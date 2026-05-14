@@ -100,7 +100,7 @@ impl Default for ToolSettings {
         Self {
             printable_area: PrintableArea::default(),
             print_speed_mm_s: 30.0,
-            lift_height_mm: 0.5,
+            lift_height_mm: 1.0,
             print_start_mode: PrintStartMode::default(),
             curve_output_mode: CurveOutputMode::default(),
             corner_smoothing_enabled: default_corner_smoothing_enabled(),
