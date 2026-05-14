@@ -47,6 +47,18 @@ impl SvgPlacement {
     }
 }
 
+fn default_corner_smoothing_enabled() -> bool {
+    true
+}
+
+fn default_corner_smoothing_radius_mm() -> f32 {
+    0.75
+}
+
+fn default_corner_smoothing_angle_deg() -> f32 {
+    45.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSettings {
     pub printable_area: PrintableArea,
@@ -56,6 +68,12 @@ pub struct ToolSettings {
     pub print_start_mode: PrintStartMode,
     #[serde(default)]
     pub curve_output_mode: CurveOutputMode,
+    #[serde(default = "default_corner_smoothing_enabled")]
+    pub corner_smoothing_enabled: bool,
+    #[serde(default = "default_corner_smoothing_radius_mm")]
+    pub corner_smoothing_radius_mm: f32,
+    #[serde(default = "default_corner_smoothing_angle_deg")]
+    pub corner_smoothing_angle_deg: f32,
 }
 
 impl ToolSettings {
@@ -64,6 +82,8 @@ impl ToolSettings {
             PrintableArea::new(self.printable_area.width_mm, self.printable_area.height_mm);
         self.print_speed_mm_s = self.print_speed_mm_s.clamp(1.0, 500.0);
         self.lift_height_mm = self.lift_height_mm.clamp(0.1, 25.0);
+        self.corner_smoothing_radius_mm = self.corner_smoothing_radius_mm.clamp(0.1, 10.0);
+        self.corner_smoothing_angle_deg = self.corner_smoothing_angle_deg.clamp(5.0, 170.0);
     }
 
     pub fn print_feed_rate(&self) -> f32 {
@@ -83,6 +103,9 @@ impl Default for ToolSettings {
             lift_height_mm: 2.5,
             print_start_mode: PrintStartMode::default(),
             curve_output_mode: CurveOutputMode::default(),
+            corner_smoothing_enabled: default_corner_smoothing_enabled(),
+            corner_smoothing_radius_mm: default_corner_smoothing_radius_mm(),
+            corner_smoothing_angle_deg: default_corner_smoothing_angle_deg(),
         }
     }
 }
@@ -100,7 +123,28 @@ pub enum PrintStartMode {
 pub enum CurveOutputMode {
     #[default]
     LinearSegments,
+    PreferG2G3,
     PreferG5,
+    PreferG2G3AndG5,
+}
+
+impl CurveOutputMode {
+    pub fn from_flags(prefer_g2g3: bool, prefer_g5: bool) -> Self {
+        match (prefer_g2g3, prefer_g5) {
+            (false, false) => Self::LinearSegments,
+            (true, false) => Self::PreferG2G3,
+            (false, true) => Self::PreferG5,
+            (true, true) => Self::PreferG2G3AndG5,
+        }
+    }
+
+    pub fn prefers_g2g3(self) -> bool {
+        matches!(self, Self::PreferG2G3 | Self::PreferG2G3AndG5)
+    }
+
+    pub fn prefers_g5(self) -> bool {
+        matches!(self, Self::PreferG5 | Self::PreferG2G3AndG5)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

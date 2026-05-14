@@ -24,6 +24,7 @@ impl SvgIrStroke {
         self.segments.is_empty()
     }
 
+    #[cfg(test)]
     pub fn start_point(&self) -> Option<Vec2> {
         self.segments.first().map(SvgIrSegment::start_point)
     }

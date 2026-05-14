@@ -626,17 +626,50 @@ impl PenarticApp {
                     0.1,
                     0.1..=25.0,
                 );
-                let mut prefer_g5 = self.settings.curve_output_mode == CurveOutputMode::PreferG5;
-                if ui.checkbox(&mut prefer_g5, "Bezier G-code 사용 (G5)").changed() {
-                    self.settings.curve_output_mode = if prefer_g5 {
-                        CurveOutputMode::PreferG5
-                    } else {
-                        CurveOutputMode::LinearSegments
-                    };
+                let mut prefer_g2g3 = self.settings.curve_output_mode.prefers_g2g3();
+                let mut prefer_g5 = self.settings.curve_output_mode.prefers_g5();
+                let prefer_g2g3_changed =
+                    ui.checkbox(&mut prefer_g2g3, "원호 G-code 사용 (G2/G3)").changed();
+                let prefer_g5_changed =
+                    ui.checkbox(&mut prefer_g5, "Bezier G-code 사용 (G5)").changed();
+                if prefer_g2g3_changed || prefer_g5_changed {
+                    self.settings.curve_output_mode =
+                        CurveOutputMode::from_flags(prefer_g2g3, prefer_g5);
                     settings_changed = true;
                 }
-                if prefer_g5 {
+                if prefer_g2g3 && prefer_g5 {
+                    ui.small("코너에서 만든 짧은 원호는 G2/G3로, 베지어 곡선은 G5로 내보냅니다.");
+                } else if prefer_g2g3 {
+                    ui.small("코너 둥글림 등 원호 구간을 G2/G3로 내보냅니다.");
+                } else if prefer_g5 {
                     ui.small("지원 펌웨어에서는 곡선을 G5로 내보내고, 미리보기는 동일한 IR에서 계산합니다.");
+                }
+
+                if ui
+                    .checkbox(
+                        &mut self.settings.corner_smoothing_enabled,
+                        "급한 코너를 미세하게 둥글게 처리",
+                    )
+                    .changed()
+                {
+                    settings_changed = true;
+                }
+                if self.settings.corner_smoothing_enabled {
+                    settings_changed |= drag_value_row(
+                        ui,
+                        "코너 둥글림 반경 (mm)",
+                        &mut self.settings.corner_smoothing_radius_mm,
+                        0.05,
+                        0.1..=10.0,
+                    );
+                    settings_changed |= drag_value_row(
+                        ui,
+                        "코너 둥글림 시작 각도 (°)",
+                        &mut self.settings.corner_smoothing_angle_deg,
+                        1.0,
+                        5.0..=170.0,
+                    );
+                    ui.small("이 각도 이상의 방향 전환에서만 짧은 원호를 넣어 꺾임을 완화합니다.");
                 }
 
                 ui.separator();
