@@ -1,17 +1,16 @@
+#[cfg(not(target_arch = "wasm32"))]
+use crate::fonts::{self, LoadedFallbackFonts};
 use std::time::Duration;
 
 use eframe::egui;
 
 use crate::{
     device::{ConnectionState, DeviceController},
-    fonts, gcode,
+    gcode,
     model::{PrintableArea, ToolSettings, ToolpathPlan},
     svg_toolpath,
     viewer::{PreviewRenderer, ViewportState},
 };
-
-#[cfg(not(target_arch = "wasm32"))]
-use crate::fonts::LoadedFallbackFonts;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{self, TryRecvError};
