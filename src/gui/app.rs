@@ -1,5 +1,6 @@
+use super::fonts;
 #[cfg(not(target_arch = "wasm32"))]
-use super::fonts::{self, LoadedFallbackFonts};
+use super::fonts::LoadedFallbackFonts;
 use std::time::Duration;
 
 use eframe::egui;
@@ -99,6 +100,8 @@ impl PenarticApp {
         startup_error: Option<String>,
     ) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        #[cfg(target_arch = "wasm32")]
+        fonts::apply_fallback_fonts(&cc.egui_ctx, fonts::web_fallback_fonts());
 
         let mut device = DeviceController::new();
         device.refresh_ports();
@@ -462,7 +465,8 @@ impl PenarticApp {
                         ui.separator();
                         ui.heading("디바이스");
 
-                        let is_native = self.device.connection_state() != ConnectionState::Unsupported;
+                        let has_device_support =
+                            self.device.connection_state() != ConnectionState::Unsupported;
                         let status_color = connection_status_color(&self.device);
                         ui.horizontal(|ui| {
                             ui.label("상태");
@@ -494,7 +498,7 @@ impl PenarticApp {
                         }
 
                         let mut print_start_mode_changed = false;
-                        ui.add_enabled_ui(is_native, |ui| {
+                        ui.add_enabled_ui(has_device_support, |ui| {
                             if ui.button("포트 새로고침").clicked() {
                                 self.device.refresh_ports();
                             }
@@ -515,7 +519,7 @@ impl PenarticApp {
 
                             let can_connect =
                                 matches!(self.device.connection_state(), ConnectionState::Disconnected)
-                                    && !self.device.ports().is_empty();
+                                    && self.device.can_connect();
                             let can_disconnect = matches!(
                                 self.device.connection_state(),
                                 ConnectionState::Connecting | ConnectionState::Connected

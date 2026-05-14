@@ -2381,6 +2381,7 @@ dependencies = [
  "eframe",
  "glam",
  "image",
+ "js-sys",
  "log",
  "poll-promise",
  "rfd",

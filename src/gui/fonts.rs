@@ -115,6 +115,14 @@ pub fn spawn_fallback_font_loader() -> Option<std::sync::mpsc::Receiver<LoadedFa
     None
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn web_fallback_fonts() -> LoadedFallbackFonts {
+    vec![(
+        "web_cjk_kr_noto_sans".to_owned(),
+        FontData::from_static(include_bytes!("../../assets/fonts/NotoSansCJKkr-Regular.otf")),
+    )]
+}
+
 pub fn apply_fallback_fonts(ctx: &egui::Context, fallback_fonts: LoadedFallbackFonts) {
     if fallback_fonts.is_empty() {
         return;

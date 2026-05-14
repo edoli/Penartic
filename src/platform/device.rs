@@ -2,6 +2,14 @@ use std::{collections::VecDeque, time::Duration};
 
 use crate::plot::model::PrintableArea;
 
+#[cfg(target_arch = "wasm32")]
+use {
+    js_sys::{Function, Object, Reflect, Uint8Array},
+    std::{cell::RefCell, rc::Rc},
+    wasm_bindgen::{JsCast as _, JsValue},
+    wasm_bindgen_futures::{JsFuture, spawn_local},
+};
+
 const DEVICE_LOG_LIMIT: usize = 48;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const MAX_IN_FLIGHT_LINES: usize = 8;
@@ -38,6 +46,8 @@ pub struct DeviceController {
     last_error: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
     worker: Option<NativeWorker>,
+    #[cfg(target_arch = "wasm32")]
+    worker: Option<WebWorker>,
 }
 
 impl DeviceController {
@@ -54,12 +64,22 @@ impl DeviceController {
             last_error: None,
             #[cfg(not(target_arch = "wasm32"))]
             worker: None,
+            #[cfg(target_arch = "wasm32")]
+            worker: None,
         };
 
         #[cfg(target_arch = "wasm32")]
         {
-            controller.connection_state = ConnectionState::Unsupported;
-            controller.push_log("웹 빌드에서는 오프라인 미리보기와 G-code 복사만 지원합니다.");
+            if web_serial_api().is_some() {
+                controller.selected_port = Some("브라우저에서 포트 선택".to_owned());
+                controller.available_ports.push("브라우저에서 포트 선택".to_owned());
+                controller.push_log("Web Serial API로 장치 연결을 사용할 수 있습니다.");
+            } else {
+                controller.connection_state = ConnectionState::Unsupported;
+                controller.push_log(
+                    "이 브라우저는 Web Serial API를 지원하지 않습니다. Chrome/Edge의 HTTPS 또는 localhost에서 실행하세요.",
+                );
+            }
         }
 
         controller
@@ -69,7 +89,15 @@ impl DeviceController {
         #[cfg(target_arch = "wasm32")]
         {
             self.available_ports.clear();
-            self.connection_state = ConnectionState::Unsupported;
+            if web_serial_api().is_none() {
+                self.connection_state = ConnectionState::Unsupported;
+                self.selected_port = None;
+                return;
+            }
+
+            self.selected_port = Some("브라우저에서 포트 선택".to_owned());
+            self.available_ports.push("브라우저에서 포트 선택".to_owned());
+            self.push_log("연결 버튼을 누르면 브라우저에서 Web Serial 포트를 선택합니다.");
             return;
         }
 
@@ -154,10 +182,22 @@ impl DeviceController {
         self.is_connected() && self.is_job_active()
     }
 
+    pub fn can_connect(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.connection_state == ConnectionState::Disconnected && web_serial_api().is_some()
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            !self.available_ports.is_empty()
+        }
+    }
+
     pub fn needs_poll(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         {
-            false
+            self.worker.is_some()
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -177,8 +217,25 @@ impl DeviceController {
     pub fn connect(&mut self) -> Result<(), String> {
         #[cfg(target_arch = "wasm32")]
         {
-            self.connection_state = ConnectionState::Unsupported;
-            return Err("웹 빌드에서는 실제 장치 연결을 지원하지 않습니다.".to_owned());
+            if web_serial_api().is_none() {
+                self.connection_state = ConnectionState::Unsupported;
+                return Err(
+                    "이 브라우저는 Web Serial API를 지원하지 않습니다. Chrome/Edge의 HTTPS 또는 localhost에서 실행하세요."
+                        .to_owned(),
+                );
+            }
+
+            self.disconnect();
+            let worker = WebWorker::spawn();
+            self.worker = Some(worker);
+            self.connection_state = ConnectionState::Connecting;
+            self.print_state = PrintState::Idle;
+            self.last_error = None;
+            self.firmware_summary = None;
+            self.detected_area = None;
+            self.selected_port = Some("Web Serial 장치".to_owned());
+            self.push_log("브라우저 포트 선택 창을 엽니다.");
+            Ok(())
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -219,6 +276,14 @@ impl DeviceController {
     }
 
     pub fn disconnect(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(worker) = self.worker.take() {
+            worker.queue_command(WorkerCommand::Disconnect);
+            self.connection_state = ConnectionState::Disconnected;
+            self.print_state = PrintState::Idle;
+            self.push_log("장치 연결을 종료했습니다.");
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(worker) = self.worker.take() {
             let _ = worker.command_tx.send(WorkerCommand::Disconnect);
@@ -235,8 +300,16 @@ impl DeviceController {
     pub fn send_job(&mut self, gcode_lines: &[String]) -> Result<(), String> {
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = gcode_lines;
-            return Err("웹 빌드에서는 장치로 직접 출력할 수 없습니다.".to_owned());
+            if self.is_job_active() {
+                return Err("이미 프린트가 진행 중입니다.".to_owned());
+            }
+
+            let worker =
+                self.worker.as_ref().ok_or_else(|| "먼저 장치를 연결하세요.".to_owned())?;
+            worker.queue_command(WorkerCommand::QueueJob(gcode_lines.to_vec()));
+            self.print_state = PrintState::Printing;
+            self.push_log(format!("G-code {}줄을 장치로 전송 큐에 올렸습니다.", gcode_lines.len()));
+            Ok(())
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -262,7 +335,16 @@ impl DeviceController {
     pub fn stop_job(&mut self) -> Result<(), String> {
         #[cfg(target_arch = "wasm32")]
         {
-            return Err("웹 빌드에서는 장치 출력을 중지할 수 없습니다.".to_owned());
+            if !self.can_stop_print() {
+                return Err("현재 중지할 프린트 작업이 없습니다.".to_owned());
+            }
+
+            let worker =
+                self.worker.as_ref().ok_or_else(|| "먼저 장치를 연결하세요.".to_owned())?;
+            worker.queue_command(WorkerCommand::CancelJob);
+            self.print_state = PrintState::Stopping;
+            self.push_log("프린트 중지를 요청했습니다. 장치가 지원하면 즉시 정지합니다.");
+            Ok(())
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -363,7 +445,58 @@ impl DeviceController {
     pub fn tick(&mut self) -> Option<PrintableArea> {
         #[cfg(target_arch = "wasm32")]
         {
-            return None;
+            let mut events = Vec::new();
+            {
+                let Some(worker) = self.worker.as_ref() else {
+                    return None;
+                };
+                events.extend(worker.drain_events());
+            }
+
+            let mut newly_detected_area = None;
+            for event in events {
+                match event {
+                    WorkerEvent::PortOpened => {
+                        self.push_log("시리얼 포트를 열었습니다. 펌웨어 응답을 기다립니다.");
+                    }
+                    WorkerEvent::Connected => {
+                        self.connection_state = ConnectionState::Connected;
+                    }
+                    WorkerEvent::Line(line) => {
+                        if let Some(firmware) = parse_firmware(&line) {
+                            self.firmware_summary = Some(firmware);
+                        }
+                        if let Some(area) = detect_build_volume(&line) {
+                            self.detected_area = Some(area);
+                            newly_detected_area = Some(area);
+                        }
+                        self.push_log(line);
+                    }
+                    WorkerEvent::Error(message) => {
+                        self.last_error = Some(message.clone());
+                        self.connection_state = ConnectionState::Disconnected;
+                        self.print_state = PrintState::Idle;
+                        self.push_log(format!("장치 오류: {message}"));
+                        self.worker = None;
+                        break;
+                    }
+                    WorkerEvent::JobCompleted => {
+                        self.print_state = PrintState::Idle;
+                        self.push_log("프린트가 완료되었습니다.");
+                    }
+                    WorkerEvent::JobCancelled => {
+                        self.print_state = PrintState::Idle;
+                        self.push_log("프린트가 중지되었습니다.");
+                    }
+                    WorkerEvent::Disconnected => {
+                        self.connection_state = ConnectionState::Disconnected;
+                        self.print_state = PrintState::Idle;
+                        self.worker = None;
+                        break;
+                    }
+                }
+            }
+            return newly_detected_area;
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -445,8 +578,15 @@ impl DeviceController {
     ) -> Result<(), String> {
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (log_line, commands);
-            return Err("웹 빌드에서는 수동 장치 제어를 지원하지 않습니다.".to_owned());
+            if self.is_job_active() {
+                return Err("프린트 중에는 수동 제어를 사용할 수 없습니다.".to_owned());
+            }
+
+            let worker =
+                self.worker.as_ref().ok_or_else(|| "먼저 장치를 연결하세요.".to_owned())?;
+            worker.queue_command(WorkerCommand::QueueManual(commands));
+            self.push_log(log_line);
+            Ok(())
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -489,7 +629,6 @@ impl NativeWorker {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 enum WorkerCommand {
     QueueJob(Vec<String>),
     QueueManual(Vec<String>),
@@ -497,7 +636,6 @@ enum WorkerCommand {
     Disconnect,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 enum WorkerEvent {
     PortOpened,
     Connected,
@@ -690,7 +828,6 @@ fn run_worker(
     let _ = event_tx.send(WorkerEvent::Disconnected);
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn parse_firmware(line: &str) -> Option<String> {
     let upper = line.to_ascii_uppercase();
     if upper.contains("FIRMWARE_NAME") || upper.contains("MACHINE_TYPE") {
@@ -700,19 +837,16 @@ fn parse_firmware(line: &str) -> Option<String> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn is_ack_line(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     lower == "ok" || lower.starts_with("ok ")
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn is_ready_line(line: &str) -> bool {
     let upper = line.to_ascii_uppercase();
     is_ack_line(line) || upper.contains("FIRMWARE_NAME") || upper == "START"
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn clean_gcode_lines(lines: Vec<String>) -> Vec<String> {
     lines
         .into_iter()
@@ -723,7 +857,6 @@ fn clean_gcode_lines(lines: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn detect_build_volume(line: &str) -> Option<PrintableArea> {
     let upper = line.to_ascii_uppercase();
     if upper.contains("MIN:") && upper.contains("MAX:") {
@@ -745,7 +878,6 @@ fn detect_build_volume(line: &str) -> Option<PrintableArea> {
     if x > 10.0 && y > 10.0 { Some(PrintableArea::new(x, y)) } else { None }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn detect_min_max_build_volume(line: &str) -> Option<PrintableArea> {
     let max_start = line.find("MAX:")?;
     let max_values = &line[max_start + "MAX:".len()..];
@@ -764,7 +896,6 @@ fn detect_min_max_build_volume(line: &str) -> Option<PrintableArea> {
     if width > 10.0 && height > 10.0 { Some(PrintableArea::new(width, height)) } else { None }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum QueuedLineSource {
     Job,
@@ -772,7 +903,6 @@ enum QueuedLineSource {
     Stop,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 struct QueuedLine {
     line: String,
     source: QueuedLineSource,
@@ -807,7 +937,6 @@ fn build_absolute_xy_move_command(x_mm: f32, y_mm: f32, feed_rate_mm_min: f32) -
     format!("G1 X{x_mm:.2} Y{y_mm:.2} F{:.0}", feed_rate_mm_min.max(60.0))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn extract_axis_value(line: &str, axis: char) -> Option<f32> {
     let bytes = line.as_bytes();
     let axis = axis as u8;
@@ -841,6 +970,400 @@ fn extract_axis_value(line: &str, axis: char) -> Option<f32> {
     }
 
     None
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Default)]
+struct WebEventQueue(Rc<RefCell<VecDeque<WorkerEvent>>>);
+
+#[cfg(target_arch = "wasm32")]
+impl WebEventQueue {
+    fn push(&self, event: WorkerEvent) {
+        self.0.borrow_mut().push_back(event);
+    }
+
+    fn drain(&self) -> Vec<WorkerEvent> {
+        self.0.borrow_mut().drain(..).collect()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Default)]
+struct WebCommandQueue(Rc<RefCell<VecDeque<WorkerCommand>>>);
+
+#[cfg(target_arch = "wasm32")]
+impl WebCommandQueue {
+    fn push(&self, command: WorkerCommand) {
+        self.0.borrow_mut().push_back(command);
+    }
+
+    fn pop(&self) -> Option<WorkerCommand> {
+        self.0.borrow_mut().pop_front()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct WebWorker {
+    commands: WebCommandQueue,
+    events: WebEventQueue,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WebWorker {
+    fn spawn() -> Self {
+        let commands = WebCommandQueue::default();
+        let events = WebEventQueue::default();
+        spawn_local(run_web_worker(commands.clone(), events.clone()));
+        Self { commands, events }
+    }
+
+    fn queue_command(&self, command: WorkerCommand) {
+        self.commands.push(command);
+    }
+
+    fn drain_events(&self) -> Vec<WorkerEvent> {
+        self.events.drain()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn run_web_worker(commands: WebCommandQueue, events: WebEventQueue) {
+    let result = run_web_worker_inner(commands, events.clone()).await;
+    if let Err(error) = result {
+        events.push(WorkerEvent::Error(error));
+    }
+    events.push(WorkerEvent::Disconnected);
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn run_web_worker_inner(
+    commands: WebCommandQueue,
+    events: WebEventQueue,
+) -> Result<(), String> {
+    let serial = web_serial_api().ok_or_else(|| {
+        "이 브라우저는 Web Serial API를 지원하지 않습니다. Chrome/Edge의 HTTPS 또는 localhost에서 실행하세요."
+            .to_owned()
+    })?;
+    let port = await_js(call_method0(&serial, "requestPort")?).await?;
+    let options = Object::new();
+    Reflect::set(&options, &JsValue::from_str("baudRate"), &JsValue::from_f64(115_200.0))
+        .map_err(js_error_message)?;
+    await_js(call_method1(&port, "open", options.as_ref())?).await?;
+    events.push(WorkerEvent::PortOpened);
+
+    let readable = Reflect::get(&port, &JsValue::from_str("readable")).map_err(js_error_message)?;
+    let reader = call_method0(&readable, "getReader")?;
+    let writable = Reflect::get(&port, &JsValue::from_str("writable")).map_err(js_error_message)?;
+    let writer = call_method0(&writable, "getWriter")?;
+
+    let shared = WebSerialShared::new(commands, events.clone(), writer, reader.clone());
+    spawn_local(web_writer_loop(shared.clone()));
+
+    let mut pending_text = String::new();
+    loop {
+        let read_result = await_js(call_method0(&reader, "read")?).await?;
+        let done = Reflect::get(&read_result, &JsValue::from_str("done"))
+            .map_err(js_error_message)?
+            .as_bool()
+            .unwrap_or(false);
+        if done {
+            break;
+        }
+
+        let value =
+            Reflect::get(&read_result, &JsValue::from_str("value")).map_err(js_error_message)?;
+        if value.is_undefined() || value.is_null() {
+            continue;
+        }
+
+        let bytes = Uint8Array::new(&value).to_vec();
+        pending_text.push_str(&String::from_utf8_lossy(&bytes));
+        while let Some(end_of_line) = pending_text.find('\n') {
+            let line = pending_text[..end_of_line].trim().to_owned();
+            pending_text.drain(..=end_of_line);
+            if line.is_empty() {
+                continue;
+            }
+            shared.handle_line(&line);
+        }
+
+        if shared.disconnect_requested() {
+            break;
+        }
+    }
+
+    shared.request_disconnect();
+    let _ = call_method0(&reader, "releaseLock");
+    let _ = call_method0(&port, "close").and_then(|promise| promise_to_future(promise));
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+struct WebSerialShared(Rc<RefCell<WebSerialState>>);
+
+#[cfg(target_arch = "wasm32")]
+struct WebSerialState {
+    commands: WebCommandQueue,
+    events: WebEventQueue,
+    writer: JsValue,
+    reader: JsValue,
+    queued_lines: VecDeque<QueuedLine>,
+    queued_job_count: usize,
+    in_flight_sources: VecDeque<QueuedLineSource>,
+    in_flight_job_count: usize,
+    job_cancelled: bool,
+    ready: bool,
+    disconnect_requested: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WebSerialShared {
+    fn new(
+        commands: WebCommandQueue,
+        events: WebEventQueue,
+        writer: JsValue,
+        reader: JsValue,
+    ) -> Self {
+        Self(Rc::new(RefCell::new(WebSerialState {
+            commands,
+            events,
+            writer,
+            reader,
+            queued_lines: VecDeque::new(),
+            queued_job_count: 0,
+            in_flight_sources: VecDeque::new(),
+            in_flight_job_count: 0,
+            job_cancelled: false,
+            ready: false,
+            disconnect_requested: false,
+        })))
+    }
+
+    fn request_disconnect(&self) {
+        self.0.borrow_mut().disconnect_requested = true;
+    }
+
+    fn disconnect_requested(&self) -> bool {
+        self.0.borrow().disconnect_requested
+    }
+
+    fn handle_line(&self, line: &str) {
+        let mut state = self.0.borrow_mut();
+        if !state.ready && is_ready_line(line) {
+            state.ready = true;
+            state.queued_lines.extend(["M115", "M503", "M211"].into_iter().map(|line| {
+                QueuedLine { line: line.to_owned(), source: QueuedLineSource::Manual }
+            }));
+            state.events.push(WorkerEvent::Connected);
+        }
+
+        if state.ready && is_ack_line(line) {
+            if let Some(source) = state.in_flight_sources.pop_front() {
+                if source == QueuedLineSource::Job {
+                    state.in_flight_job_count = state.in_flight_job_count.saturating_sub(1);
+                    if state.queued_job_count == 0 && state.in_flight_job_count == 0 {
+                        state.events.push(if state.job_cancelled {
+                            WorkerEvent::JobCancelled
+                        } else {
+                            WorkerEvent::JobCompleted
+                        });
+                        state.job_cancelled = false;
+                    }
+                }
+            }
+        }
+
+        state.events.push(WorkerEvent::Line(line.to_owned()));
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn web_writer_loop(shared: WebSerialShared) {
+    let mut last_ready_ping_ms = 0.0;
+    let ready_started_ms = js_sys::Date::now();
+
+    loop {
+        if shared.disconnect_requested() {
+            return;
+        }
+
+        let write_result = {
+            let mut state = shared.0.borrow_mut();
+
+            while let Some(command) = state.commands.pop() {
+                match command {
+                    WorkerCommand::QueueJob(lines) => {
+                        let lines = clean_gcode_lines(lines);
+                        if !lines.is_empty() {
+                            state.job_cancelled = false;
+                        }
+                        state.queued_job_count += lines.len();
+                        state.queued_lines.extend(
+                            lines
+                                .into_iter()
+                                .map(|line| QueuedLine { line, source: QueuedLineSource::Job }),
+                        );
+                    }
+                    WorkerCommand::QueueManual(lines) => {
+                        state.queued_lines.extend(
+                            clean_gcode_lines(lines)
+                                .into_iter()
+                                .map(|line| QueuedLine { line, source: QueuedLineSource::Manual }),
+                        );
+                    }
+                    WorkerCommand::CancelJob => {
+                        state.job_cancelled = true;
+                        state.queued_lines = state
+                            .queued_lines
+                            .drain(..)
+                            .filter(|queued| queued.source != QueuedLineSource::Job)
+                            .collect();
+                        state.queued_job_count = 0;
+                        state.queued_lines.push_front(QueuedLine {
+                            line: "M400".to_owned(),
+                            source: QueuedLineSource::Stop,
+                        });
+                        state.queued_lines.push_front(QueuedLine {
+                            line: "M410".to_owned(),
+                            source: QueuedLineSource::Stop,
+                        });
+                        if state.in_flight_job_count == 0 {
+                            state.events.push(WorkerEvent::JobCancelled);
+                            state.job_cancelled = false;
+                        }
+                    }
+                    WorkerCommand::Disconnect => {
+                        state.disconnect_requested = true;
+                        let _ = call_method0(&state.reader, "cancel");
+                        return;
+                    }
+                }
+            }
+
+            if !state.ready {
+                let now = js_sys::Date::now();
+                if now - last_ready_ping_ms >= READY_PING_INTERVAL.as_millis() as f64 {
+                    last_ready_ping_ms = now;
+                    Some((state.writer.clone(), b"M115\n".to_vec()))
+                } else if now - ready_started_ms >= READY_TIMEOUT.as_millis() as f64 {
+                    state.events.push(WorkerEvent::Error(
+                        "펌웨어가 준비 응답을 보내지 않았습니다.".to_owned(),
+                    ));
+                    state.disconnect_requested = true;
+                    None
+                } else {
+                    None
+                }
+            } else if state.in_flight_sources.len() < MAX_IN_FLIGHT_LINES {
+                let mut batch = Vec::new();
+                while state.in_flight_sources.len() < MAX_IN_FLIGHT_LINES {
+                    let Some(queued) = state.queued_lines.pop_front() else {
+                        break;
+                    };
+
+                    batch.extend_from_slice(queued.line.as_bytes());
+                    batch.push(b'\n');
+                    if queued.source == QueuedLineSource::Job {
+                        state.queued_job_count = state.queued_job_count.saturating_sub(1);
+                        state.in_flight_job_count += 1;
+                    }
+                    state.in_flight_sources.push_back(queued.source);
+
+                    if batch.len() >= 2048 {
+                        break;
+                    }
+                }
+
+                (!batch.is_empty()).then(|| (state.writer.clone(), batch))
+            } else {
+                None
+            }
+        };
+
+        if let Some((writer, bytes)) = write_result {
+            if let Err(error) = web_serial_write(&writer, &bytes).await {
+                let mut state = shared.0.borrow_mut();
+                state.events.push(WorkerEvent::Error(error));
+                state.disconnect_requested = true;
+                let _ = call_method0(&state.reader, "cancel");
+            }
+        }
+
+        delay_ms(10).await;
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn web_serial_write(writer: &JsValue, bytes: &[u8]) -> Result<(), String> {
+    let data = Uint8Array::new_with_length(bytes.len() as u32);
+    data.copy_from(bytes);
+    await_js(call_method1(writer, "write", data.as_ref())?).await?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_serial_api() -> Option<JsValue> {
+    let window = eframe::web_sys::window()?;
+    let navigator = window.navigator();
+    let serial = Reflect::get(navigator.as_ref(), &JsValue::from_str("serial")).ok()?;
+    (!serial.is_undefined() && !serial.is_null()).then_some(serial)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn call_method0(target: &JsValue, name: &str) -> Result<JsValue, String> {
+    Reflect::get(target, &JsValue::from_str(name))
+        .map_err(js_error_message)?
+        .dyn_into::<Function>()
+        .map_err(js_error_message)?
+        .call0(target)
+        .map_err(js_error_message)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn call_method1(target: &JsValue, name: &str, arg: &JsValue) -> Result<JsValue, String> {
+    Reflect::get(target, &JsValue::from_str(name))
+        .map_err(js_error_message)?
+        .dyn_into::<Function>()
+        .map_err(js_error_message)?
+        .call1(target, arg)
+        .map_err(js_error_message)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn promise_to_future(value: JsValue) -> Result<JsFuture, String> {
+    value.dyn_into::<js_sys::Promise>().map(JsFuture::from).map_err(js_error_message)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn await_js(value: JsValue) -> Result<JsValue, String> {
+    promise_to_future(value)?.await.map_err(js_error_message)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn delay_ms(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        if let Some(window) = eframe::web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        } else {
+            let _ = resolve.call0(&JsValue::UNDEFINED);
+        }
+    });
+    let _ = JsFuture::from(promise).await;
+}
+
+#[cfg(target_arch = "wasm32")]
+fn js_error_message(value: JsValue) -> String {
+    if let Some(message) = Reflect::get(&value, &JsValue::from_str("message"))
+        .ok()
+        .and_then(|message| message.as_string())
+    {
+        message
+    } else if let Some(text) = value.as_string() {
+        text
+    } else {
+        format!("{value:?}")
+    }
 }
 
 #[cfg(test)]

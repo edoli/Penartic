@@ -49,7 +49,7 @@ The product must remain useful even when no device is connected:
 | --- | --- |
 | `src/gui/app.rs` | Main egui application state, sidebar UI, SVG loading, SVG placement controls, playback controls, and layout wiring |
 | `src/gui/viewer.rs` | Custom WGPU paint callback for the bed, pen mesh, and timeline-aware motion preview |
-| `src/gui/fonts.rs` | Native fallback CJK font discovery and deferred font loading |
+| `src/gui/fonts.rs` | Native fallback CJK font discovery, deferred native font loading, and bundled web CJK font registration |
 | `src/svg/ir.rs` | SVG intermediate-representation primitives, curve math, dash splitting, and polyline approximation helpers |
 | `src/svg/toolpath.rs` | Parse SVG with `usvg`, build SVG IR strokes, compute intrinsic bounds, and apply persistent placement transforms |
 | `src/plot/gcode.rs` | Convert SVG IR into preview motion segments, apply optional tangent-based join rounding, and emit linear, G2/G3, and/or G5 G-code |
@@ -94,14 +94,17 @@ updated with the same value to avoid WGPU validation errors.
 - native builds asynchronously scan platform font locations and an optional `fallback_font.ttf`
   next to the executable
 - loaded fallback fonts are appended to egui proportional and monospace families
-- web builds currently rely on browser/system fonts and do not scan local files
+- web builds register a bundled Noto Sans CJK KR font because egui renders text into its own
+  canvas glyph atlas and cannot rely on page CSS fonts for Korean glyph coverage
 
 ## 6. Device integration
 
-- serial support is native-only and uses `serialport`
+- serial support uses `serialport` on native builds and the browser Web Serial API on web builds
 - the device controller keeps the app usable when no port is available
 - firmware/build-volume probing is intentionally best-effort because printer responses vary by firmware
-- native connection probing sends `M115`, `M503`, and `M211`; Marlin `M211` `Min:`/`Max:` reports are used to detect printable width and height when `M503` does not include build volume
+- native connection probing sends `M115`, `M503`, and `M211`; web connection probing starts with
+  `M115` for readiness and then accepts the same firmware/build-volume response parsing while the
+  serial stream is active; Marlin `M211` `Min:`/`Max:` reports are used to detect printable width and height when `M503` does not include build volume
 - if device probing fails, the manually configured printable area remains authoritative
 - detected printable area changes are applied only when the reported size actually changes, to avoid redundant rebuild churn
 - printable area changes rebuild the preview/toolpath but do not overwrite a user-adjusted SVG placement or size
@@ -110,6 +113,9 @@ updated with the same value to avoid WGPU validation errors.
 - direct jog/home controls send synchronized metric movement commands for XY and Z when no print job is active
 - a dedicated first-start-point command raises Z only by the configured lift amount, homes XY, and then moves to the first drawing start point without starting the whole job
 - the serial worker strips comments before transmission, keeps a bounded set of acknowledged G-code lines in flight, and never treats read timeouts as acknowledgements
+- web serial streaming follows the same comment stripping, ACK tracking, stop, jog/home, and bounded
+  in-flight behavior as the native worker; it requires a browser with Web Serial support, a secure
+  context, and the user's explicit port selection
 - G2/G3 arc output is optional because firmware support varies and is used for rounded-corner transitions when those joins can be represented as true arcs
 - G5 curve output is optional because firmware support varies; the default remains linear G-code for compatibility
 
@@ -140,9 +146,9 @@ Current non-goals:
 | SVG import and conversion | Yes | Yes |
 | 3D preview | Yes | Yes |
 | G-code copy/export flow | Yes | Yes |
-| Serial device connection | Yes | No |
-| Firmware probing | Yes | No |
-| Local CJK font scanning | Yes | No |
+| Serial device connection | Yes | Yes, through Web Serial |
+| Firmware probing | Yes | Yes, best-effort through Web Serial |
+| Local CJK font scanning | Yes | No, uses bundled CJK font |
 | Crash log files | Yes | No |
 
 ## 9. Tooling and validation
