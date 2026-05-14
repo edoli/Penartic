@@ -335,6 +335,25 @@ impl DeviceController {
         )
     }
 
+    pub fn home_xy_and_move_to(
+        &mut self,
+        x_mm: f32,
+        y_mm: f32,
+        feed_rate_mm_min: f32,
+    ) -> Result<(), String> {
+        self.queue_manual_commands(
+            "첫 그리기 시작 위치 이동 명령을 전송했습니다.",
+            vec![
+                "G21".to_owned(),
+                "M400".to_owned(),
+                "G90".to_owned(),
+                "G28 X Y".to_owned(),
+                build_absolute_xy_move_command(x_mm, y_mm, feed_rate_mm_min),
+                "M400".to_owned(),
+            ],
+        )
+    }
+
     pub fn tick(&mut self) -> Option<PrintableArea> {
         #[cfg(target_arch = "wasm32")]
         {
@@ -778,6 +797,10 @@ fn build_relative_move_command(
     Some(command)
 }
 
+fn build_absolute_xy_move_command(x_mm: f32, y_mm: f32, feed_rate_mm_min: f32) -> String {
+    format!("G1 X{x_mm:.2} Y{y_mm:.2} F{:.0}", feed_rate_mm_min.max(60.0))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn extract_axis_value(line: &str, axis: char) -> Option<f32> {
     let bytes = line.as_bytes();
@@ -847,5 +870,11 @@ mod tests {
     fn builds_relative_xy_move_command() {
         let command = build_relative_move_command(10.0, -2.5, 0.0, 1800.0).unwrap();
         assert_eq!(command, "G1 X10.000 Y-2.500 F1800");
+    }
+
+    #[test]
+    fn builds_absolute_xy_move_command_for_first_point() {
+        let command = build_absolute_xy_move_command(12.5, 4.0, 1800.0);
+        assert_eq!(command, "G1 X12.50 Y4.00 F1800");
     }
 }

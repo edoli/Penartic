@@ -23,7 +23,7 @@ pub struct ViewportState {
 
 impl Default for ViewportState {
     fn default() -> Self {
-        Self { yaw: 0.65, pitch: 0.75, zoom: 1.15, pan: Vec2::ZERO }
+        Self { yaw: -std::f32::consts::FRAC_PI_2, pitch: 0.75, zoom: 1.15, pan: Vec2::ZERO }
     }
 }
 
@@ -157,7 +157,7 @@ impl PreviewRenderer {
         plan: Option<&ToolpathPlan>,
         progress: f32,
         state: &mut ViewportState,
-    ) {
+    ) -> egui::Rect {
         let desired = egui::vec2(desired_size.x.max(1.0), desired_size.y.max(1.0));
         let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::drag());
         let scene_extent = plan
@@ -175,7 +175,7 @@ impl PreviewRenderer {
                 egui::TextStyle::Heading.resolve(ui.style()),
                 colors::error(),
             );
-            return;
+            return rect;
         }
 
         let Some(plan) = plan else {
@@ -186,7 +186,7 @@ impl PreviewRenderer {
                 egui::TextStyle::Heading.resolve(ui.style()),
                 colors::muted_text(),
             );
-            return;
+            return rect;
         };
 
         let geometry = PreviewGeometry::from_plan(plan, progress, rect.size(), state);
@@ -198,6 +198,7 @@ impl PreviewRenderer {
                 line_vertices: geometry.line_vertices,
             },
         ));
+        rect
     }
 }
 

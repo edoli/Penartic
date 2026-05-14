@@ -52,6 +52,8 @@ pub struct ToolSettings {
     pub printable_area: PrintableArea,
     pub print_speed_mm_s: f32,
     pub lift_height_mm: f32,
+    #[serde(default)]
+    pub print_start_mode: PrintStartMode,
 }
 
 impl ToolSettings {
@@ -77,8 +79,17 @@ impl Default for ToolSettings {
             printable_area: PrintableArea::default(),
             print_speed_mm_s: 30.0,
             lift_height_mm: 2.5,
+            print_start_mode: PrintStartMode::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PrintStartMode {
+    #[default]
+    HomeBeforePrint,
+    DirectFromCurrentPosition,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +127,7 @@ pub struct ToolpathPlan {
     pub printable_area: PrintableArea,
     pub drawing_origin: Vec2,
     pub drawing_bounds: Vec2,
+    pub first_draw_point: Option<Vec2>,
     pub is_out_of_bounds: bool,
     pub segments: Vec<MotionSegment>,
     pub segment_end_times_s: Vec<f32>,
@@ -202,6 +214,7 @@ mod tests {
             printable_area: PrintableArea::new(220.0, 220.0),
             drawing_origin: vec2(0.0, 0.0),
             drawing_bounds: vec2(110.0, 0.0),
+            first_draw_point: Some(vec2(0.0, 0.0)),
             is_out_of_bounds: false,
             segments: vec![
                 MotionSegment {

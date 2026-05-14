@@ -20,6 +20,10 @@ pub fn preview_background() -> Color32 {
     Color32::from_rgb(14, 18, 24)
 }
 
+pub fn preview_overlay_background() -> Color32 {
+    Color32::from_rgba_unmultiplied(14, 18, 24, 212)
+}
+
 pub fn preview_plane() -> [f32; 4] {
     [0.08, 0.11, 0.16, 1.0]
 }

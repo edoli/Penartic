@@ -10,7 +10,7 @@ use crate::{
     platform::device::{ConnectionState, DeviceController, PrintState},
     plot::{
         gcode,
-        model::{PrintableArea, SvgPlacement, ToolSettings, ToolpathPlan},
+        model::{PrintStartMode, PrintableArea, SvgPlacement, ToolSettings, ToolpathPlan},
     },
     res::colors,
     svg::toolpath,
@@ -24,6 +24,7 @@ use poll_promise::Promise;
 
 const SIDEBAR_WIDTH: f32 = 360.0;
 const PREVIEW_CONTROL_BAND_HEIGHT: f32 = 104.0;
+const PREVIEW_CONTROL_OVERLAY_MARGIN: f32 = 12.0;
 const CONTROL_BUTTON_WIDTH: f32 = 44.0;
 const CONTROL_BUTTON_HEIGHT: f32 = 44.0;
 const CONTROL_GRID_SPACING: f32 = 4.0;
@@ -438,10 +439,6 @@ impl PenarticApp {
                 ui.set_width(sidebar_width);
                 ui.set_min_width(sidebar_width);
 
-                ui.heading("Penartic");
-                ui.label("SVG를 G-code로 변환하고, 오프라인/장치 연결 모드를 모두 지원합니다.");
-                ui.separator();
-
                 if ui.button("SVG 불러오기").clicked() {
                     self.pick_svg();
                 }
@@ -471,7 +468,14 @@ impl PenarticApp {
                 });
 
                 if let Some(firmware) = self.device.firmware_summary() {
-                    ui.label(format!("펌웨어: {firmware}"));
+                    ui.horizontal(|ui| {
+                        ui.label("펌웨어");
+                        let response = ui.add_sized(
+                            [ui.available_width().max(0.0), 0.0],
+                            egui::Label::new(firmware).truncate(),
+                        );
+                        response.on_hover_text(firmware);
+                    });
                 }
 
                 if let Some(area) = self.device.detected_area() {
@@ -481,6 +485,7 @@ impl PenarticApp {
                     ));
                 }
 
+                let mut print_start_mode_changed = false;
                 ui.add_enabled_ui(is_native, |ui| {
                     if ui.button("포트 새로고침").clicked() {
                         self.device.refresh_ports();
@@ -526,6 +531,8 @@ impl PenarticApp {
                         && self.device.is_connected()
                         && !self.device.is_job_active();
                     let can_stop_print = self.device.can_stop_print();
+                    let first_draw_point =
+                        self.toolpath_plan.as_ref().and_then(|plan| plan.first_draw_point);
                     ui.columns_sized([Size::remainder(1.0), Size::remainder(1.0)], |columns| {
                         if columns[0]
                             .add_enabled(can_start_print, egui::Button::new("프린트 시작"))
@@ -546,6 +553,41 @@ impl PenarticApp {
                             self.apply_device_action(result);
                         }
                     });
+
+                    let mut start_with_home =
+                        self.settings.print_start_mode == PrintStartMode::HomeBeforePrint;
+                    if ui.checkbox(&mut start_with_home, "프린트 시작 전에 XY Home 이동").changed() {
+                        self.settings.print_start_mode = if start_with_home {
+                            PrintStartMode::HomeBeforePrint
+                        } else {
+                            PrintStartMode::DirectFromCurrentPosition
+                        };
+                        print_start_mode_changed = true;
+                    }
+                    if !start_with_home {
+                        ui.small("끄면 현재 헤드가 첫 시작점과 그리기 높이에 맞춰진 상태에서 바로 그리기 시작합니다.");
+                    }
+
+                    let can_move_to_first_draw_point = first_draw_point.is_some()
+                        && self.device.is_connected()
+                        && !self.device.is_job_active();
+                    if ui
+                        .add_enabled(
+                            can_move_to_first_draw_point,
+                            egui::Button::new("첫 시작점으로 이동"),
+                        )
+                        .clicked()
+                    {
+                        if let Some(first_draw_point) = first_draw_point {
+                            let result = self.device.home_xy_and_move_to(
+                                first_draw_point.x,
+                                first_draw_point.y,
+                                self.settings.travel_feed_rate(),
+                            );
+                            self.apply_device_action(result);
+                        }
+                    }
+                    ui.small("Home 후 첫 번째 그리기 시작 위치로 이동합니다.");
                 });
 
                 self.show_manual_controls(ui);
@@ -640,7 +682,7 @@ impl PenarticApp {
                     ui.small("SVG를 불러오면 위치와 크기를 조절할 수 있습니다.");
                 }
 
-                if settings_changed || placement_changed {
+                if settings_changed || placement_changed || print_start_mode_changed {
                     self.rebuild_toolpath();
                 }
 
@@ -686,7 +728,9 @@ impl PenarticApp {
                     |ui| {
                         ui.set_min_width(log_width);
                         for line in self.device.log_lines().rev() {
-                            ui.add_sized([log_width, 0.0], egui::Label::new(line).wrap());
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                                ui.add_sized([log_width, 0.0], egui::Label::new(line).wrap());
+                            });
                         }
                     },
                 );
@@ -708,78 +752,98 @@ impl PenarticApp {
             .unwrap_or_else(|| "0%".to_owned());
 
         egui::CentralPanel::default().show_inside(root_ui, |ui| {
-            egui::Panel::bottom("preview-controls")
-                .resizable(false)
-                .exact_size(PREVIEW_CONTROL_BAND_HEIGHT)
-                .show_inside(ui, |ui| {
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        let toggle_label =
-                            if self.preview_playing { "일시정지" } else { "재생" };
-                        if ui
-                            .add_enabled(
-                                self.toolpath_plan.is_some(),
-                                egui::Button::new(toggle_label),
-                            )
-                            .clicked()
-                        {
-                            if self.preview_progress >= 1.0 {
-                                self.preview_progress = 0.0;
-                            }
-                            self.preview_playing = !self.preview_playing;
-                        }
-
-                        if ui
-                            .add_enabled(
-                                self.toolpath_plan.is_some(),
-                                egui::Button::new("처음으로"),
-                            )
-                            .clicked()
-                        {
-                            self.preview_progress = 0.0;
-                            self.preview_playing = false;
-                        }
-
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(timeline_text);
-                        });
-                    });
-
-                    ui.add_space(6.0);
-                    ui.label("타임라인");
-                    ui.scope(|ui| {
-                        ui.spacing_mut().slider_width = ui.available_width();
-                        let current_interact_height = ui.spacing().interact_size.y;
-                        ui.spacing_mut().interact_size.y = current_interact_height.max(28.0);
-                        let slider = egui::Slider::new(&mut self.preview_progress, 0.0..=1.0)
-                            .show_value(false);
-                        let mut changed = false;
-                        ui.add_enabled_ui(self.toolpath_plan.is_some(), |ui| {
-                            changed = ui.add_sized([ui.available_width(), 28.0], slider).changed();
-                        });
-                        if changed {
-                            self.preview_playing = false;
-                        }
-                    });
-                });
-
-            ui.heading("3D 미리보기");
-            ui.label(
-                "왼쪽 드래그로 회전, 오른쪽 드래그로 이동, 마우스 휠로 확대/축소할 수 있습니다.",
-            );
-            ui.add_space(8.0);
             egui::Frame::canvas(ui.style()).show(ui, |ui| {
-                let preview_size = egui::vec2(ui.available_width(), ui.available_height());
-                ui.set_min_height(preview_size.y.max(1.0));
-                self.preview_renderer.show(
+                let preview_size = egui::vec2(ui.available_width(), ui.available_height().max(1.0));
+                ui.set_min_height(preview_size.y);
+                let preview_rect = self.preview_renderer.show(
                     ui,
                     preview_size,
                     self.toolpath_plan.as_ref(),
                     self.preview_progress,
                     &mut self.viewport_state,
                 );
+                self.show_preview_controls_overlay(ui, preview_rect, &timeline_text);
             });
         });
+    }
+
+    fn show_preview_controls_overlay(
+        &mut self,
+        ui: &mut egui::Ui,
+        preview_rect: egui::Rect,
+        timeline_text: &str,
+    ) {
+        let available_height = preview_rect.height() - PREVIEW_CONTROL_OVERLAY_MARGIN * 2.0;
+        let available_width = preview_rect.width() - PREVIEW_CONTROL_OVERLAY_MARGIN * 2.0;
+        if available_height <= 0.0 || available_width <= 0.0 {
+            return;
+        }
+
+        let overlay_height = available_height.min(PREVIEW_CONTROL_BAND_HEIGHT);
+        let overlay_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                preview_rect.left() + PREVIEW_CONTROL_OVERLAY_MARGIN,
+                preview_rect.bottom() - PREVIEW_CONTROL_OVERLAY_MARGIN - overlay_height,
+            ),
+            egui::vec2(available_width, overlay_height),
+        );
+        egui::Area::new(egui::Id::new("preview-controls-overlay"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(overlay_rect.min)
+            .show(ui.ctx(), |ui| {
+                let (area_rect, _) =
+                    ui.allocate_exact_size(overlay_rect.size(), egui::Sense::hover());
+                ui.painter().rect_filled(area_rect, 10.0, colors::preview_overlay_background());
+
+                let inner_rect = area_rect.shrink2(egui::vec2(12.0, 10.0));
+                let mut overlay_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(inner_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                overlay_ui.set_width(inner_rect.width());
+
+                overlay_ui.horizontal(|ui| {
+                    let toggle_label = if self.preview_playing { "일시정지" } else { "재생" };
+                    if ui
+                        .add_enabled(self.toolpath_plan.is_some(), egui::Button::new(toggle_label))
+                        .clicked()
+                    {
+                        if self.preview_progress >= 1.0 {
+                            self.preview_progress = 0.0;
+                        }
+                        self.preview_playing = !self.preview_playing;
+                    }
+
+                    if ui
+                        .add_enabled(self.toolpath_plan.is_some(), egui::Button::new("처음으로"))
+                        .clicked()
+                    {
+                        self.preview_progress = 0.0;
+                        self.preview_playing = false;
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(timeline_text);
+                    });
+                });
+
+                overlay_ui.add_space(8.0);
+                overlay_ui.scope(|ui| {
+                    ui.spacing_mut().slider_width = ui.available_width();
+                    let current_interact_height = ui.spacing().interact_size.y;
+                    ui.spacing_mut().interact_size.y = current_interact_height.max(28.0);
+                    let slider =
+                        egui::Slider::new(&mut self.preview_progress, 0.0..=1.0).show_value(false);
+                    let mut changed = false;
+                    ui.add_enabled_ui(self.toolpath_plan.is_some(), |ui| {
+                        changed = ui.add_sized([ui.available_width(), 28.0], slider).changed();
+                    });
+                    if changed {
+                        self.preview_playing = false;
+                    }
+                });
+            });
     }
 }
 
