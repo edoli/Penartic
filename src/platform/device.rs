@@ -12,7 +12,7 @@ use {
 
 const DEVICE_LOG_LIMIT: usize = 48;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-const MAX_IN_FLIGHT_LINES: usize = 8;
+const MAX_IN_FLIGHT_LINES: usize = 1;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const READY_PING_INTERVAL: Duration = Duration::from_millis(500);
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -667,7 +667,7 @@ fn run_worker(
 
         let mut queued_lines: VecDeque<QueuedLine> = VecDeque::new();
         let mut queued_job_count = 0usize;
-        let mut in_flight_sources = VecDeque::new();
+        let mut in_flight_lines = VecDeque::new();
         let mut in_flight_job_count = 0usize;
         let mut job_cancelled = false;
         let mut read_buffer = [0_u8; 512];
@@ -740,10 +740,10 @@ fn run_worker(
                 }
             }
 
-            while ready && in_flight_sources.len() < MAX_IN_FLIGHT_LINES {
+            while ready && in_flight_lines.len() < MAX_IN_FLIGHT_LINES {
                 let mut batch = Vec::new();
 
-                while in_flight_sources.len() < MAX_IN_FLIGHT_LINES {
+                while in_flight_lines.len() < MAX_IN_FLIGHT_LINES {
                     let Some(queued) = queued_lines.pop_front() else {
                         break;
                     };
@@ -755,7 +755,7 @@ fn run_worker(
                         queued_job_count = queued_job_count.saturating_sub(1);
                         in_flight_job_count += 1;
                     }
-                    in_flight_sources.push_back(queued.source);
+                    in_flight_lines.push_back(queued);
 
                     if batch.len() >= 2048 {
                         break;
@@ -790,8 +790,8 @@ fn run_worker(
                         }
 
                         if ready && is_ack_line(&line) {
-                            if let Some(source) = in_flight_sources.pop_front() {
-                                if source == QueuedLineSource::Job {
+                            if let Some(acknowledged) = in_flight_lines.pop_front() {
+                                if acknowledged.source == QueuedLineSource::Job {
                                     in_flight_job_count = in_flight_job_count.saturating_sub(1);
                                     if queued_job_count == 0 && in_flight_job_count == 0 {
                                         event_tx
@@ -807,6 +807,7 @@ fn run_worker(
                             }
                         }
 
+                        let line = annotate_busy_line(line, in_flight_lines.front());
                         event_tx
                             .send(WorkerEvent::Line(line))
                             .map_err(|error| error.to_string())?;
@@ -845,6 +846,22 @@ fn is_ack_line(line: &str) -> bool {
 fn is_ready_line(line: &str) -> bool {
     let upper = line.to_ascii_uppercase();
     is_ack_line(line) || upper.contains("FIRMWARE_NAME") || upper == "START"
+}
+
+fn is_busy_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("busy:") || lower.starts_with("echo:busy")
+}
+
+fn annotate_busy_line(line: String, waiting_line: Option<&QueuedLine>) -> String {
+    if !is_busy_line(&line) {
+        return line;
+    }
+
+    match waiting_line {
+        Some(waiting) => format!("{line} (대기 중 명령: {})", waiting.line),
+        None => line,
+    }
 }
 
 fn clean_gcode_lines(lines: Vec<String>) -> Vec<String> {
@@ -1110,7 +1127,7 @@ struct WebSerialState {
     reader: JsValue,
     queued_lines: VecDeque<QueuedLine>,
     queued_job_count: usize,
-    in_flight_sources: VecDeque<QueuedLineSource>,
+    in_flight_lines: VecDeque<QueuedLine>,
     in_flight_job_count: usize,
     job_cancelled: bool,
     ready: bool,
@@ -1132,7 +1149,7 @@ impl WebSerialShared {
             reader,
             queued_lines: VecDeque::new(),
             queued_job_count: 0,
-            in_flight_sources: VecDeque::new(),
+            in_flight_lines: VecDeque::new(),
             in_flight_job_count: 0,
             job_cancelled: false,
             ready: false,
@@ -1159,8 +1176,8 @@ impl WebSerialShared {
         }
 
         if state.ready && is_ack_line(line) {
-            if let Some(source) = state.in_flight_sources.pop_front() {
-                if source == QueuedLineSource::Job {
+            if let Some(acknowledged) = state.in_flight_lines.pop_front() {
+                if acknowledged.source == QueuedLineSource::Job {
                     state.in_flight_job_count = state.in_flight_job_count.saturating_sub(1);
                     if state.queued_job_count == 0 && state.in_flight_job_count == 0 {
                         state.events.push(if state.job_cancelled {
@@ -1174,7 +1191,10 @@ impl WebSerialShared {
             }
         }
 
-        state.events.push(WorkerEvent::Line(line.to_owned()));
+        state.events.push(WorkerEvent::Line(annotate_busy_line(
+            line.to_owned(),
+            state.in_flight_lines.front(),
+        )));
     }
 }
 
@@ -1255,9 +1275,9 @@ async fn web_writer_loop(shared: WebSerialShared) {
                 } else {
                     None
                 }
-            } else if state.in_flight_sources.len() < MAX_IN_FLIGHT_LINES {
+            } else if state.in_flight_lines.len() < MAX_IN_FLIGHT_LINES {
                 let mut batch = Vec::new();
-                while state.in_flight_sources.len() < MAX_IN_FLIGHT_LINES {
+                while state.in_flight_lines.len() < MAX_IN_FLIGHT_LINES {
                     let Some(queued) = state.queued_lines.pop_front() else {
                         break;
                     };
@@ -1268,7 +1288,7 @@ async fn web_writer_loop(shared: WebSerialShared) {
                         state.queued_job_count = state.queued_job_count.saturating_sub(1);
                         state.in_flight_job_count += 1;
                     }
-                    state.in_flight_sources.push_back(queued.source);
+                    state.in_flight_lines.push_back(queued);
 
                     if batch.len() >= 2048 {
                         break;
