@@ -2,16 +2,17 @@ use glam::{Vec2, vec2};
 use thiserror::Error;
 use usvg::{Node, Options, Tree, tiny_skia_path::PathSegment};
 
-use crate::plot::model::{PrintableArea, SvgPlacement};
+use crate::{
+    plot::model::{PrintableArea, SvgPlacement},
+    svg::ir::{DashPattern, SvgIrSegment, SvgIrStroke},
+};
 
-const COLLINEAR_SIMPLIFY_DISTANCE_MM: f32 = 0.05;
-const COLLINEAR_SIMPLIFY_DOT_THRESHOLD: f32 = 0.9995;
 const OUT_OF_BOUNDS_TOLERANCE_MM: f32 = 0.01;
 
 #[derive(Debug, Clone)]
 pub struct PreparedSvg {
     pub source_name: String,
-    pub polylines: Vec<Vec<Vec2>>,
+    pub strokes: Vec<SvgIrStroke>,
     pub warnings: Vec<String>,
     pub drawing_origin: Vec2,
     pub drawing_bounds: Vec2,
@@ -21,9 +22,15 @@ pub struct PreparedSvg {
 #[derive(Debug, Clone)]
 pub struct ParsedSvg {
     pub source_name: String,
-    raw_polylines: Vec<Vec<Vec2>>,
+    raw_strokes: Vec<RawStroke>,
     pub warnings: Vec<String>,
     bounds: SourceBounds,
+}
+
+#[derive(Debug, Clone)]
+struct RawStroke {
+    stroke: SvgIrStroke,
+    dash_pattern: Option<DashPattern>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -65,17 +72,17 @@ pub fn parse_svg(
 ) -> Result<ParsedSvg, SvgToolpathError> {
     let source_name = source_name.into();
     let tree = Tree::from_data(bytes, &Options::default())?;
-    let mut raw_polylines = Vec::new();
+    let mut raw_strokes = Vec::new();
     let mut warning_flags = WarningFlags::default();
 
-    collect_group(tree.root(), &mut raw_polylines, &mut warning_flags);
+    collect_group(tree.root(), &mut raw_strokes, &mut warning_flags);
 
-    raw_polylines.retain(|polyline| polyline.len() >= 2);
-    if raw_polylines.is_empty() {
+    raw_strokes.retain(|stroke| !stroke.stroke.is_empty());
+    if raw_strokes.is_empty() {
         return Err(SvgToolpathError::NoPaths);
     }
 
-    let (min, max) = bounds(&raw_polylines);
+    let (min, max) = bounds(&raw_strokes);
     let source_size = max - min;
     let mut warnings = Vec::new();
     if tree.has_text_nodes() || warning_flags.saw_text {
@@ -90,7 +97,7 @@ pub fn parse_svg(
 
     Ok(ParsedSvg {
         source_name,
-        raw_polylines,
+        raw_strokes,
         warnings,
         bounds: SourceBounds { min, max, size: source_size },
     })
@@ -106,29 +113,30 @@ pub fn prepare_svg(
 
     let drawing_bounds = parsed.drawing_size_for(placement);
     let drawing_origin = placement.drawing_origin(drawing_bounds);
-    let polylines = parsed
-        .raw_polylines
-        .iter()
-        .map(|polyline| {
-            let scaled = polyline
-                .iter()
-                .copied()
-                .map(|point| {
-                    vec2(
-                        (point.x - parsed.bounds.min.x) * placement.scale_mm_per_unit
-                            + drawing_origin.x,
-                        (parsed.bounds.max.y - point.y) * placement.scale_mm_per_unit
-                            + drawing_origin.y,
-                    )
-                })
-                .collect::<Vec<_>>();
-            simplify_polyline(&scaled)
-        })
-        .collect::<Vec<_>>();
+
+    let map = |point: Vec2| {
+        vec2(
+            (point.x - parsed.bounds.min.x) * placement.scale_mm_per_unit + drawing_origin.x,
+            (parsed.bounds.max.y - point.y) * placement.scale_mm_per_unit + drawing_origin.y,
+        )
+    };
+
+    let mut strokes = Vec::new();
+    for raw_stroke in &parsed.raw_strokes {
+        let transformed = raw_stroke.stroke.transformed(map);
+        if let Some(dash_pattern) = &raw_stroke.dash_pattern {
+            strokes.extend(
+                transformed.apply_dash_pattern(&dash_pattern.scaled(placement.scale_mm_per_unit)),
+            );
+        } else {
+            strokes.push(transformed);
+        }
+    }
+    strokes.retain(|stroke| !stroke.is_empty());
 
     PreparedSvg {
         source_name: parsed.source_name.clone(),
-        polylines,
+        strokes,
         warnings: parsed.warnings.clone(),
         drawing_origin,
         drawing_bounds,
@@ -136,12 +144,17 @@ pub fn prepare_svg(
     }
 }
 
-fn collect_group(group: &usvg::Group, polylines: &mut Vec<Vec<Vec2>>, flags: &mut WarningFlags) {
+fn collect_group(group: &usvg::Group, strokes: &mut Vec<RawStroke>, flags: &mut WarningFlags) {
     for node in group.children() {
         match node {
-            Node::Group(group) => collect_group(group, polylines, flags),
+            Node::Group(group) => collect_group(group, strokes, flags),
             Node::Path(path) if path.is_visible() => {
-                polylines.extend(sample_path(path));
+                let dash_pattern = path
+                    .stroke()
+                    .and_then(|stroke| DashPattern::new(stroke.dasharray()?, stroke.dashoffset()));
+                for stroke in sample_path(path) {
+                    strokes.push(RawStroke { stroke, dash_pattern: dash_pattern.clone() });
+                }
             }
             Node::Image(_) => flags.saw_image = true,
             Node::Text(_) => flags.saw_text = true,
@@ -150,30 +163,26 @@ fn collect_group(group: &usvg::Group, polylines: &mut Vec<Vec<Vec2>>, flags: &mu
     }
 }
 
-fn sample_path(path: &usvg::Path) -> Vec<Vec<Vec2>> {
-    let mut polylines = Vec::new();
-    let mut current_polyline = Vec::new();
+fn sample_path(path: &usvg::Path) -> Vec<SvgIrStroke> {
+    let mut strokes = Vec::new();
+    let mut current_segments = Vec::new();
     let transform = path.abs_transform();
 
     let mut current = Vec2::ZERO;
     let mut move_to = Vec2::ZERO;
     let mut has_current = false;
 
-    let flush = |buffer: &mut Vec<Vec2>, output: &mut Vec<Vec<Vec2>>| {
-        dedupe_polyline(buffer);
-        if buffer.len() >= 2 {
-            output.push(std::mem::take(buffer));
-        } else {
-            buffer.clear();
+    let flush = |buffer: &mut Vec<SvgIrSegment>, output: &mut Vec<SvgIrStroke>| {
+        if !buffer.is_empty() {
+            output.push(SvgIrStroke::new(std::mem::take(buffer)));
         }
     };
 
     for segment in path.data().segments() {
         match segment {
             PathSegment::MoveTo(point) => {
-                flush(&mut current_polyline, &mut polylines);
+                flush(&mut current_segments, &mut strokes);
                 let mapped = map_point(transform, point);
-                current_polyline.push(mapped);
                 current = mapped;
                 move_to = mapped;
                 has_current = true;
@@ -183,8 +192,10 @@ fn sample_path(path: &usvg::Path) -> Vec<Vec<Vec2>> {
                     continue;
                 }
                 let mapped = map_point(transform, point);
-                push_unique(&mut current_polyline, mapped);
-                current = mapped;
+                if current.distance_squared(mapped) > 1e-6 {
+                    current_segments.push(SvgIrSegment::line(current, mapped));
+                    current = mapped;
+                }
             }
             PathSegment::QuadTo(control, point) => {
                 if !has_current {
@@ -192,8 +203,10 @@ fn sample_path(path: &usvg::Path) -> Vec<Vec<Vec2>> {
                 }
                 let control = map_point(transform, control);
                 let end = map_point(transform, point);
-                append_quadratic(&mut current_polyline, current, control, end);
-                current = end;
+                if current.distance_squared(end) > 1e-6 {
+                    current_segments.push(SvgIrSegment::quadratic(current, control, end));
+                    current = end;
+                }
             }
             PathSegment::CubicTo(control_a, control_b, point) => {
                 if !has_current {
@@ -202,13 +215,17 @@ fn sample_path(path: &usvg::Path) -> Vec<Vec<Vec2>> {
                 let control_a = map_point(transform, control_a);
                 let control_b = map_point(transform, control_b);
                 let end = map_point(transform, point);
-                append_cubic(&mut current_polyline, current, control_a, control_b, end);
-                current = end;
+                if current.distance_squared(end) > 1e-6 {
+                    current_segments.push(SvgIrSegment::cubic(current, control_a, control_b, end));
+                    current = end;
+                }
             }
             PathSegment::Close => {
                 if has_current {
-                    push_unique(&mut current_polyline, move_to);
-                    flush(&mut current_polyline, &mut polylines);
+                    if current.distance_squared(move_to) > 1e-6 {
+                        current_segments.push(SvgIrSegment::line(current, move_to));
+                    }
+                    flush(&mut current_segments, &mut strokes);
                     current = move_to;
                     has_current = false;
                 }
@@ -216,24 +233,38 @@ fn sample_path(path: &usvg::Path) -> Vec<Vec<Vec2>> {
         }
     }
 
-    flush(&mut current_polyline, &mut polylines);
-    polylines
+    flush(&mut current_segments, &mut strokes);
+    strokes
 }
 
-fn bounds(polylines: &[Vec<Vec2>]) -> (Vec2, Vec2) {
+fn bounds(strokes: &[RawStroke]) -> (Vec2, Vec2) {
     let mut min = vec2(f32::INFINITY, f32::INFINITY);
     let mut max = vec2(f32::NEG_INFINITY, f32::NEG_INFINITY);
 
-    for polyline in polylines {
-        for point in polyline {
-            min.x = min.x.min(point.x);
-            min.y = min.y.min(point.y);
-            max.x = max.x.max(point.x);
-            max.y = max.y.max(point.y);
+    for stroke in strokes {
+        for segment in &stroke.stroke.segments {
+            for point in segment_points_for_bounds(*segment) {
+                min.x = min.x.min(point.x);
+                min.y = min.y.min(point.y);
+                max.x = max.x.max(point.x);
+                max.y = max.y.max(point.y);
+            }
         }
     }
 
     (min, max)
+}
+
+fn segment_points_for_bounds(segment: SvgIrSegment) -> [Vec2; 4] {
+    match segment {
+        SvgIrSegment::Line(segment) => [segment.start, segment.end, segment.end, segment.end],
+        SvgIrSegment::Quadratic(segment) => {
+            [segment.start, segment.control, segment.end, segment.end]
+        }
+        SvgIrSegment::Cubic(segment) => {
+            [segment.start, segment.control_a, segment.control_b, segment.end]
+        }
+    }
 }
 
 fn drawing_out_of_bounds(origin: Vec2, size: Vec2, printable_area: PrintableArea) -> bool {
@@ -249,124 +280,10 @@ fn map_point(transform: usvg::Transform, point: usvg::tiny_skia_path::Point) -> 
     vec2(point.x, point.y)
 }
 
-fn push_unique(polyline: &mut Vec<Vec2>, point: Vec2) {
-    if polyline.last().is_none_or(|last| last.distance_squared(point) > 1e-6) {
-        polyline.push(point);
-    }
-}
-
-fn dedupe_polyline(polyline: &mut Vec<Vec2>) {
-    let mut cleaned = Vec::with_capacity(polyline.len());
-
-    for point in polyline.iter().copied() {
-        if cleaned.last().is_none_or(|last: &Vec2| last.distance_squared(point) > 1e-6) {
-            cleaned.push(point);
-        }
-    }
-
-    *polyline = cleaned;
-}
-
-fn simplify_polyline(polyline: &[Vec2]) -> Vec<Vec2> {
-    if polyline.len() <= 2 {
-        return polyline.to_vec();
-    }
-
-    let mut simplified = Vec::with_capacity(polyline.len());
-    simplified.push(polyline[0]);
-
-    for point in polyline.iter().copied().skip(1) {
-        simplified.push(point);
-
-        while simplified.len() >= 3 {
-            let len = simplified.len();
-            let a = simplified[len - 3];
-            let b = simplified[len - 2];
-            let c = simplified[len - 1];
-            if is_mergeable_collinear_triplet(a, b, c) {
-                simplified.remove(len - 2);
-            } else {
-                break;
-            }
-        }
-    }
-
-    simplified
-}
-
-fn is_mergeable_collinear_triplet(a: Vec2, b: Vec2, c: Vec2) -> bool {
-    let ab = b - a;
-    let bc = c - b;
-    let ac = c - a;
-
-    if ab.length_squared() <= 1e-6 || bc.length_squared() <= 1e-6 || ac.length_squared() <= 1e-6 {
-        return true;
-    }
-
-    let ab_dir = ab.normalize();
-    let bc_dir = bc.normalize();
-    let direction_match = ab_dir.dot(bc_dir) >= COLLINEAR_SIMPLIFY_DOT_THRESHOLD;
-    let deviation_sq = point_to_segment_distance_sq(b, a, c);
-    direction_match && deviation_sq <= COLLINEAR_SIMPLIFY_DISTANCE_MM.powi(2)
-}
-
-fn point_to_segment_distance_sq(point: Vec2, start: Vec2, end: Vec2) -> f32 {
-    let segment = end - start;
-    let length_sq = segment.length_squared();
-    if length_sq <= 1e-6 {
-        return point.distance_squared(start);
-    }
-
-    let t = ((point - start).dot(segment) / length_sq).clamp(0.0, 1.0);
-    let projected = start + segment * t;
-    point.distance_squared(projected)
-}
-
-fn append_quadratic(polyline: &mut Vec<Vec2>, start: Vec2, control: Vec2, end: Vec2) {
-    let control_length = start.distance(control) + control.distance(end);
-    let steps = ((control_length / 12.0).ceil() as usize).clamp(6, 48);
-
-    for step in 1..=steps {
-        let t = step as f32 / steps as f32;
-        let point = quadratic(start, control, end, t);
-        push_unique(polyline, point);
-    }
-}
-
-fn append_cubic(
-    polyline: &mut Vec<Vec2>,
-    start: Vec2,
-    control_a: Vec2,
-    control_b: Vec2,
-    end: Vec2,
-) {
-    let control_length =
-        start.distance(control_a) + control_a.distance(control_b) + control_b.distance(end);
-    let steps = ((control_length / 12.0).ceil() as usize).clamp(8, 96);
-
-    for step in 1..=steps {
-        let t = step as f32 / steps as f32;
-        let point = cubic(start, control_a, control_b, end, t);
-        push_unique(polyline, point);
-    }
-}
-
-fn quadratic(start: Vec2, control: Vec2, end: Vec2, t: f32) -> Vec2 {
-    let omt = 1.0 - t;
-    omt * omt * start + 2.0 * omt * t * control + t * t * end
-}
-
-fn cubic(start: Vec2, control_a: Vec2, control_b: Vec2, end: Vec2, t: f32) -> Vec2 {
-    let omt = 1.0 - t;
-    omt * omt * omt * start
-        + 3.0 * omt * omt * t * control_a
-        + 3.0 * omt * t * t * control_b
-        + t * t * t * end
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::svg::ir::{SvgIrSegment, flatten_stroke_to_polyline};
     use std::{fs, path::Path};
 
     #[test]
@@ -382,8 +299,8 @@ mod tests {
         let prepared =
             prepare_svg(&parsed, parsed.centered_native_placement(printable_area), printable_area);
 
-        assert_eq!(prepared.polylines.len(), 1);
-        let polyline = &prepared.polylines[0];
+        assert_eq!(prepared.strokes.len(), 1);
+        let polyline = flatten_stroke_to_polyline(&prepared.strokes[0]);
         assert!((prepared.drawing_bounds.x - 10.0).abs() <= f32::EPSILON);
         assert!((prepared.drawing_bounds.y - 10.0).abs() <= f32::EPSILON);
         assert!((prepared.drawing_origin.x - 45.0).abs() <= f32::EPSILON);
@@ -406,8 +323,8 @@ mod tests {
         let printable_area = PrintableArea::new(100.0, 60.0);
         let prepared =
             prepare_svg(&parsed, parsed.centered_native_placement(printable_area), printable_area);
-        assert_eq!(prepared.polylines.len(), 1);
-        assert_eq!(prepared.polylines[0].len(), 2);
+        assert_eq!(prepared.strokes.len(), 1);
+        assert_eq!(flatten_stroke_to_polyline(&prepared.strokes[0]).len(), 2);
     }
 
     #[test]
@@ -441,6 +358,44 @@ mod tests {
         let prepared = prepare_svg(&parsed, placement, PrintableArea::new(100.0, 100.0));
 
         assert!(prepared.is_out_of_bounds);
+    }
+
+    #[test]
+    fn preserves_cubic_segments_in_svg_ir() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+                <path d="M 0 0 C 2 10, 8 10, 10 0" />
+            </svg>
+        "#;
+
+        let parsed = parse_svg("curve.svg", svg).unwrap();
+        let printable_area = PrintableArea::new(100.0, 60.0);
+        let prepared =
+            prepare_svg(&parsed, parsed.centered_native_placement(printable_area), printable_area);
+
+        assert!(matches!(prepared.strokes[0].segments[0], SvgIrSegment::Cubic(_)));
+    }
+
+    #[test]
+    fn supports_svg_stroke_dasharray() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 2">
+                <path d="M 0 1 L 12 1" fill="none" stroke="black" stroke-dasharray="4 2" />
+            </svg>
+        "#;
+
+        let parsed = parse_svg("dash.svg", svg).unwrap();
+        let printable_area = PrintableArea::new(120.0, 20.0);
+        let prepared =
+            prepare_svg(&parsed, parsed.centered_native_placement(printable_area), printable_area);
+
+        assert_eq!(prepared.strokes.len(), 2);
+        let first = flatten_stroke_to_polyline(&prepared.strokes[0]);
+        let second = flatten_stroke_to_polyline(&prepared.strokes[1]);
+        assert!((first.first().unwrap().x - 54.0).abs() < 0.05);
+        assert!((first.last().unwrap().x - 58.0).abs() < 0.05);
+        assert!((second.first().unwrap().x - 60.0).abs() < 0.05);
+        assert!((second.last().unwrap().x - 64.0).abs() < 0.05);
     }
 
     #[test]

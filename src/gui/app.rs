@@ -10,7 +10,10 @@ use crate::{
     platform::device::{ConnectionState, DeviceController, PrintState},
     plot::{
         gcode,
-        model::{PrintStartMode, PrintableArea, SvgPlacement, ToolSettings, ToolpathPlan},
+        model::{
+            CurveOutputMode, PrintStartMode, PrintableArea, SvgPlacement, ToolSettings,
+            ToolpathPlan,
+        },
     },
     res::colors,
     svg::toolpath,
@@ -623,6 +626,18 @@ impl PenarticApp {
                     0.1,
                     0.1..=25.0,
                 );
+                let mut prefer_g5 = self.settings.curve_output_mode == CurveOutputMode::PreferG5;
+                if ui.checkbox(&mut prefer_g5, "Bezier G-code 사용 (G5)").changed() {
+                    self.settings.curve_output_mode = if prefer_g5 {
+                        CurveOutputMode::PreferG5
+                    } else {
+                        CurveOutputMode::LinearSegments
+                    };
+                    settings_changed = true;
+                }
+                if prefer_g5 {
+                    ui.small("지원 펌웨어에서는 곡선을 G5로 내보내고, 미리보기는 동일한 IR에서 계산합니다.");
+                }
 
                 ui.separator();
                 ui.heading("SVG 배치");

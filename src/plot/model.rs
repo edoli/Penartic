@@ -54,6 +54,8 @@ pub struct ToolSettings {
     pub lift_height_mm: f32,
     #[serde(default)]
     pub print_start_mode: PrintStartMode,
+    #[serde(default)]
+    pub curve_output_mode: CurveOutputMode,
 }
 
 impl ToolSettings {
@@ -80,6 +82,7 @@ impl Default for ToolSettings {
             print_speed_mm_s: 30.0,
             lift_height_mm: 2.5,
             print_start_mode: PrintStartMode::default(),
+            curve_output_mode: CurveOutputMode::default(),
         }
     }
 }
@@ -90,6 +93,14 @@ pub enum PrintStartMode {
     #[default]
     HomeBeforePrint,
     DirectFromCurrentPosition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CurveOutputMode {
+    #[default]
+    LinearSegments,
+    PreferG5,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

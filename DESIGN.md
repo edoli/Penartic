@@ -3,7 +3,8 @@
 ## 1. Goal
 
 Penartic is a Rust-based pen plotting and repurposed-3D-printer drawing application.
-The app converts SVG input into a toolpath and G-code, previews the motion in a 3D viewport,
+The app converts SVG input into an intermediate representation (IR) and then into motion/G-code,
+previews the motion in a 3D viewport,
 and can optionally stream the job to a connected serial device.
 
 The product must remain useful even when no device is connected:
@@ -17,10 +18,10 @@ The product must remain useful even when no device is connected:
 ### 2.1 Offline workflow
 
 1. Start the app without a device.
-2. Set printable width, printable height, draw speed, and Z lift height from the left sidebar.
+2. Set printable width, printable height, draw speed, Z lift height, and optional advanced curve-output mode from the left sidebar.
 3. Load an SVG file through the file picker, drag-and-drop, or a native startup path used for validation.
 4. Start from the SVG's raw coordinate size interpreted as millimeters, centered once on load, then adjust SVG position and size from the left sidebar when needed.
-5. Convert the SVG into a sampled toolpath and G-code without automatically rescaling the existing SVG placement when printable area settings later change.
+5. Convert the SVG into a reusable IR and then into preview motion plus G-code without automatically rescaling the existing SVG placement when printable area settings later change.
 6. Show the completed result immediately in the 3D preview, then scrub backward or replay it with the timeline slider using real motion time.
 7. Copy the generated G-code if needed.
 
@@ -30,15 +31,17 @@ The product must remain useful even when no device is connected:
 2. Connect to the device.
 3. Probe firmware information (`M115`) and configuration (`M503`) on a best-effort basis.
 4. If build volume information is detected, update the printable area and rebuild the toolpath without rewriting the current SVG placement or scale.
-5. Use the built-in jog/home controls for XY and Z when manual positioning is needed.
-6. Queue the generated G-code to the device, stop it if needed, and keep invalid actions disabled while the current state is active.
+5. Choose whether print start should home XY first or begin directly from the current first-draw position.
+6. Use the built-in jog/home controls for XY and Z when manual positioning is needed, including a helper that homes XY and moves to the first drawing start point.
+7. Queue the generated G-code to the device, stop it if needed, and keep invalid actions disabled while the current state is active.
 
 ### 2.3 Motion semantics
 
 - continuous drawing moves stay on the XY plane at `Z = 0`
 - travel moves lift the pen by the configured Z lift amount
-- generated jobs start by lifting Z with a relative move, homing XY, moving to the first drawing point while lifted, lowering Z with a relative move, and then drawing
-- drawing moves within a stroke are emitted as continuous `G1` XY moves without synchronization barriers between segments
+- jobs in home-start mode lift Z with a relative move, home XY, move to the first drawing point while lifted, lower Z with a relative move, and then draw
+- jobs in direct-start mode assume the head is already parked at the first drawing point and drawing height, so they begin drawing without the initial home or initial Z move
+- drawing moves within a stroke are emitted either as continuous `G1` XY moves or as higher-level `G5` spline moves when the advanced curve mode is enabled
 
 ## 3. Runtime architecture
 
@@ -47,8 +50,9 @@ The product must remain useful even when no device is connected:
 | `src/gui/app.rs` | Main egui application state, sidebar UI, SVG loading, SVG placement controls, playback controls, and layout wiring |
 | `src/gui/viewer.rs` | Custom WGPU paint callback for the bed, pen mesh, and timeline-aware motion preview |
 | `src/gui/fonts.rs` | Native fallback CJK font discovery and deferred font loading |
-| `src/svg/toolpath.rs` | Parse SVG with `usvg`, flatten path segments into polylines, compute intrinsic bounds, and apply persistent placement transforms |
-| `src/plot/gcode.rs` | Convert sampled polylines into travel/draw motion segments and G-code |
+| `src/svg/ir.rs` | SVG intermediate-representation primitives, curve math, dash splitting, and polyline approximation helpers |
+| `src/svg/toolpath.rs` | Parse SVG with `usvg`, build SVG IR strokes, compute intrinsic bounds, and apply persistent placement transforms |
+| `src/plot/gcode.rs` | Convert SVG IR into preview motion segments and either linear or G5-enhanced G-code |
 | `src/plot/model.rs` | Shared settings, motion, and toolpath data structures |
 | `src/platform/device.rs` | Native serial probing and streaming, plus native/web capability split |
 | `src/platform/crash.rs` | Native panic hook and runtime error log persistence |
@@ -61,8 +65,8 @@ The product must remain useful even when no device is connected:
 ### 4.1 UI layout
 
 - left sidebar: fixed-width device controls, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
-- sidebar action buttons use a slightly taller shared height, and paired device/job actions are laid out in evenly sized columns with explicit spacing
-- central panel: preview title, 3D preview canvas, and a bottom control band reserved for playback buttons plus a full-width timeline slider
+- sidebar action buttons use a slightly taller shared height, paired device/job actions are laid out in evenly sized columns with explicit spacing, the print-start homing toggle sits directly under the print action row, long firmware text stays on one line with hover access to the full value, device logs remain left-aligned, and advanced G5 output can be toggled from settings
+- central panel: a full-size 3D preview canvas with a translucent bottom overlay for playback buttons and the full-width timeline slider so controls remain visible in smaller windows
 
 ### 4.2 3D preview
 
@@ -74,6 +78,7 @@ window. The callback draws:
 - the current pen mesh at the playback position
 - motion progress using elapsed toolpath time rather than raw segment count
 - out-of-bounds SVG segments plus the placed SVG bounds when the drawing exceeds the printable area
+- the default camera starts from a front-aligned orientation instead of a rotated diagonal view
 - left drag rotates the camera and right drag pans the view across the bed plane
 - preview vertex buffers may grow when printable area or toolpath density changes and therefore must be resized safely before queue writes
 
@@ -103,19 +108,23 @@ updated with the same value to avoid WGPU validation errors.
 - printing state is tracked explicitly so start/stop/connect/disconnect controls can be enabled only when valid
 - the UI keeps polling the native serial worker while a device is connected or connecting, so asynchronous probe responses can update settings after the initial click frame
 - direct jog/home controls send synchronized metric movement commands for XY and Z when no print job is active
+- a dedicated first-start-point command homes XY and then moves to the first drawing start point without starting the whole job
 - the serial worker strips comments before transmission, keeps a bounded set of acknowledged G-code lines in flight, and never treats read timeouts as acknowledgements
+- G5 curve output is optional because firmware support varies; the default remains linear G-code for compatibility
 
 ## 7. SVG conversion pipeline
 
 1. Parse SVG with `usvg`.
 2. Walk visible path nodes.
-3. Convert path segments into polyline samples.
-4. Compute intrinsic SVG bounds.
-5. On load, create a one-time centered default placement that interprets SVG coordinate units as millimeters instead of auto-fitting to the printable area.
-6. Reuse the user-controlled SVG placement for later rebuilds instead of auto-rescaling when printable area changes.
-7. Mark drawings that extend beyond the printable area so the UI and preview can warn/highlight them.
-8. Build motion segments with explicit travel lifts.
-9. Emit G-code and preview data from the same toolpath plan.
+3. Convert path segments into SVG IR strokes that preserve line, quadratic, and cubic geometry.
+4. Capture stroke dash metadata so visible dashed spans can be generated from IR instead of being lost during parsing.
+5. Compute intrinsic SVG bounds.
+6. On load, create a one-time centered default placement that interprets SVG coordinate units as millimeters instead of auto-fitting to the printable area.
+7. Reuse the user-controlled SVG placement for later rebuilds instead of auto-rescaling when printable area changes.
+8. Apply placement and dash splitting in IR space.
+9. Mark drawings that extend beyond the printable area so the UI and preview can warn/highlight them.
+10. Build preview motion segments with explicit travel lifts from the IR.
+11. Emit either standard linear G-code or optional `G5` curve commands from the same IR.
 
 Current non-goals:
 
