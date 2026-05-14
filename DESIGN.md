@@ -81,6 +81,9 @@ window. The callback draws:
 - the default camera starts from a front-aligned orientation instead of a rotated diagonal view
 - left drag rotates the camera and right drag pans the view across the bed plane
 - preview vertex buffers may grow when printable area or toolpath density changes and therefore must be resized safely before queue writes
+- preview geometry is cached in world coordinates and transformed in the preview shader with a
+  per-frame camera uniform, so panning/rotating/zooming complex SVGs does not rebuild or re-upload
+  the full toolpath vertex buffer
 
 ### 4.3 WGPU/MSAA rule
 
@@ -112,9 +115,9 @@ updated with the same value to avoid WGPU validation errors.
 - the UI keeps polling the native serial worker while a device is connected or connecting, so asynchronous probe responses can update settings after the initial click frame
 - direct jog/home controls send synchronized metric movement commands for XY and Z when no print job is active
 - a dedicated first-start-point command raises Z only by the configured lift amount, homes XY, and then moves to the first drawing start point without starting the whole job
-- the serial worker strips comments before transmission, keeps a bounded set of acknowledged G-code lines in flight, and never treats read timeouts as acknowledgements
+- the serial worker strips comments before transmission, sends one G-code line per firmware acknowledgement for conservative USB/firmware buffer handling, and never treats read timeouts as acknowledgements
 - web serial streaming follows the same comment stripping, ACK tracking, stop, jog/home, and bounded
-  in-flight behavior as the native worker; it requires a browser with Web Serial support, a secure
+  one-line in-flight behavior as the native worker; it requires a browser with Web Serial support, a secure
   context, and the user's explicit port selection
 - G2/G3 arc output is optional because firmware support varies and is used for rounded-corner transitions when those joins can be represented as true arcs
 - G5 curve output is optional because firmware support varies; the default remains linear G-code for compatibility
