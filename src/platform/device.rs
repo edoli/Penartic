@@ -1,10 +1,14 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, time::Duration};
 
 use crate::plot::model::PrintableArea;
 
 const DEVICE_LOG_LIMIT: usize = 48;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-const MAX_IN_FLIGHT_LINES: usize = 128;
+const MAX_IN_FLIGHT_LINES: usize = 8;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const READY_PING_INTERVAL: Duration = Duration::from_millis(500);
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +154,18 @@ impl DeviceController {
         self.is_connected() && self.is_job_active()
     }
 
+    pub fn needs_poll(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.worker.is_some()
+        }
+    }
+
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
@@ -186,7 +202,11 @@ impl DeviceController {
             self.push_log(format!("{port_name} 에 연결을 시도합니다."));
 
             if command_tx
-                .send(WorkerCommand::QueueManual(vec!["M115".to_owned(), "M503".to_owned()]))
+                .send(WorkerCommand::QueueManual(vec![
+                    "M115".to_owned(),
+                    "M503".to_owned(),
+                    "M211".to_owned(),
+                ]))
                 .is_err()
             {
                 self.worker = None;
@@ -339,6 +359,9 @@ impl DeviceController {
 
             for event in events {
                 match event {
+                    WorkerEvent::PortOpened => {
+                        self.push_log("시리얼 포트를 열었습니다. 펌웨어 응답을 기다립니다.");
+                    }
                     WorkerEvent::Connected => {
                         self.connection_state = ConnectionState::Connected;
                     }
@@ -451,6 +474,7 @@ enum WorkerCommand {
 
 #[cfg(not(target_arch = "wasm32"))]
 enum WorkerEvent {
+    PortOpened,
     Connected,
     Line(String),
     JobCompleted,
@@ -466,29 +490,34 @@ fn run_worker(
     event_tx: std::sync::mpsc::Sender<WorkerEvent>,
 ) {
     use std::io::Read as _;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     let result = (|| -> Result<(), String> {
         let mut port = serialport::new(&port_name, 115_200)
             .timeout(Duration::from_millis(100))
             .open()
             .map_err(|error| error.to_string())?;
+        port.write_data_terminal_ready(true).map_err(|error| error.to_string())?;
+        port.write_request_to_send(true).map_err(|error| error.to_string())?;
 
-        event_tx.send(WorkerEvent::Connected).map_err(|error| error.to_string())?;
+        event_tx.send(WorkerEvent::PortOpened).map_err(|error| error.to_string())?;
 
         let mut queued_lines: VecDeque<QueuedLine> = VecDeque::new();
         let mut queued_job_count = 0usize;
         let mut in_flight_sources = VecDeque::new();
         let mut in_flight_job_count = 0usize;
-        let mut oldest_in_flight_since: Option<Instant> = None;
         let mut job_cancelled = false;
         let mut read_buffer = [0_u8; 512];
         let mut pending_text = String::new();
+        let mut ready = false;
+        let ready_started_at = Instant::now();
+        let mut last_ready_ping_at: Option<Instant> = None;
 
         loop {
             while let Ok(command) = command_rx.try_recv() {
                 match command {
                     WorkerCommand::QueueJob(lines) => {
+                        let lines = clean_gcode_lines(lines);
                         if !lines.is_empty() {
                             job_cancelled = false;
                         }
@@ -500,6 +529,7 @@ fn run_worker(
                         );
                     }
                     WorkerCommand::QueueManual(lines) => {
+                        let lines = clean_gcode_lines(lines);
                         queued_lines.extend(
                             lines
                                 .into_iter()
@@ -532,7 +562,22 @@ fn run_worker(
                 }
             }
 
-            while in_flight_sources.len() < MAX_IN_FLIGHT_LINES {
+            if !ready {
+                let now = Instant::now();
+                if last_ready_ping_at
+                    .is_none_or(|last| now.duration_since(last) >= READY_PING_INTERVAL)
+                {
+                    port.write_all(b"M115\n").map_err(|error| error.to_string())?;
+                    port.flush().map_err(|error| error.to_string())?;
+                    last_ready_ping_at = Some(now);
+                }
+
+                if now.duration_since(ready_started_at) >= READY_TIMEOUT {
+                    return Err("펌웨어가 준비 응답을 보내지 않았습니다.".to_owned());
+                }
+            }
+
+            while ready && in_flight_sources.len() < MAX_IN_FLIGHT_LINES {
                 let mut batch = Vec::new();
 
                 while in_flight_sources.len() < MAX_IN_FLIGHT_LINES {
@@ -548,7 +593,6 @@ fn run_worker(
                         in_flight_job_count += 1;
                     }
                     in_flight_sources.push_back(queued.source);
-                    oldest_in_flight_since.get_or_insert_with(Instant::now);
 
                     if batch.len() >= 2048 {
                         break;
@@ -560,6 +604,7 @@ fn run_worker(
                 }
 
                 port.write_all(&batch).map_err(|error| error.to_string())?;
+                port.flush().map_err(|error| error.to_string())?;
             }
 
             match port.read(&mut read_buffer) {
@@ -574,7 +619,14 @@ fn run_worker(
                             continue;
                         }
 
-                        if is_ack_line(&line) {
+                        if !ready && is_ready_line(&line) {
+                            ready = true;
+                            event_tx
+                                .send(WorkerEvent::Connected)
+                                .map_err(|error| error.to_string())?;
+                        }
+
+                        if ready && is_ack_line(&line) {
                             if let Some(source) = in_flight_sources.pop_front() {
                                 if source == QueuedLineSource::Job {
                                     in_flight_job_count = in_flight_job_count.saturating_sub(1);
@@ -590,8 +642,6 @@ fn run_worker(
                                     }
                                 }
                             }
-                            oldest_in_flight_since =
-                                (!in_flight_sources.is_empty()).then_some(Instant::now());
                         }
 
                         event_tx
@@ -601,28 +651,6 @@ fn run_worker(
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
-                    if oldest_in_flight_since
-                        .is_some_and(|started| started.elapsed() > Duration::from_secs(2))
-                    {
-                        if let Some(source) = in_flight_sources.pop_front() {
-                            if source == QueuedLineSource::Job {
-                                in_flight_job_count = in_flight_job_count.saturating_sub(1);
-                                if queued_job_count == 0 && in_flight_job_count == 0 {
-                                    event_tx
-                                        .send(if job_cancelled {
-                                            WorkerEvent::JobCancelled
-                                        } else {
-                                            WorkerEvent::JobCompleted
-                                        })
-                                        .map_err(|error| error.to_string())?;
-                                    job_cancelled = false;
-                                }
-                            }
-                        }
-                        oldest_in_flight_since =
-                            (!in_flight_sources.is_empty()).then_some(Instant::now());
-                    }
-
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(error) => return Err(error.to_string()),
@@ -654,8 +682,29 @@ fn is_ack_line(line: &str) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn is_ready_line(line: &str) -> bool {
+    let upper = line.to_ascii_uppercase();
+    is_ack_line(line) || upper.contains("FIRMWARE_NAME") || upper == "START"
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn clean_gcode_lines(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .filter_map(|line| {
+            let command = line.split(';').next().unwrap_or_default().trim();
+            (!command.is_empty()).then(|| command.to_owned())
+        })
+        .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn detect_build_volume(line: &str) -> Option<PrintableArea> {
     let upper = line.to_ascii_uppercase();
+    if upper.contains("MIN:") && upper.contains("MAX:") {
+        return detect_min_max_build_volume(&upper);
+    }
+
     let looks_like_size_line = upper.contains("M208")
         || upper.contains("BED")
         || upper.contains("BUILD")
@@ -669,6 +718,25 @@ fn detect_build_volume(line: &str) -> Option<PrintableArea> {
     let y = extract_axis_value(&upper, 'Y')?;
 
     if x > 10.0 && y > 10.0 { Some(PrintableArea::new(x, y)) } else { None }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn detect_min_max_build_volume(line: &str) -> Option<PrintableArea> {
+    let max_start = line.find("MAX:")?;
+    let max_values = &line[max_start + "MAX:".len()..];
+    let max_x = extract_axis_value(max_values, 'X')?;
+    let max_y = extract_axis_value(max_values, 'Y')?;
+
+    let min_values = line
+        .find("MIN:")
+        .map(|min_start| &line[min_start + "MIN:".len()..max_start])
+        .unwrap_or_default();
+    let min_x = extract_axis_value(min_values, 'X').unwrap_or(0.0);
+    let min_y = extract_axis_value(min_values, 'Y').unwrap_or(0.0);
+
+    let width = max_x - min_x;
+    let height = max_y - min_y;
+    if width > 10.0 && height > 10.0 { Some(PrintableArea::new(width, height)) } else { None }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -755,6 +823,24 @@ mod tests {
         let size = detect_build_volume("echo:  M208 X220.00 Y220.00 Z250.00 S0").unwrap();
         assert_eq!(size.width_mm, 220.0);
         assert_eq!(size.height_mm, 220.0);
+    }
+
+    #[test]
+    fn parses_marlin_m211_min_max_report() {
+        let size =
+            detect_build_volume("Min:  X0.00 Y0.00 Z0.00   Max:  X235.00 Y235.00 Z250.00").unwrap();
+        assert_eq!(size.width_mm, 235.0);
+        assert_eq!(size.height_mm, 235.0);
+    }
+
+    #[test]
+    fn removes_comments_before_sending_gcode() {
+        let lines = clean_gcode_lines(vec![
+            "; Generated by Penartic".to_owned(),
+            "G1 X1 ; inline comment".to_owned(),
+            "  ".to_owned(),
+        ]);
+        assert_eq!(lines, vec!["G1 X1"]);
     }
 
     #[test]

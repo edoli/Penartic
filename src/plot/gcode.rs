@@ -9,7 +9,6 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
     let mut segments = Vec::new();
     let mut segment_end_times_s = Vec::new();
     let mut gcode_lines = Vec::new();
-    let mut active_feed_rate = None;
 
     let draw_feed = settings.print_feed_rate();
     let travel_feed = settings.travel_feed_rate();
@@ -24,22 +23,21 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
 
     let mut current = vec3(0.0, 0.0, 0.0);
     let lifted_origin = vec3(0.0, 0.0, lift);
-    if current.distance_squared(lifted_origin) > 1e-6 {
-        push_segment(
-            &mut segments,
-            &mut segment_end_times_s,
-            current,
-            lifted_origin,
-            MotionKind::Travel,
-            travel_speed,
-        );
-        push_g1_move(&mut gcode_lines, &mut active_feed_rate, travel_feed, None, None, Some(lift));
-        current = lifted_origin;
-    }
+    push_relative_z_motion_if_needed(
+        &mut segments,
+        &mut segment_end_times_s,
+        &mut gcode_lines,
+        &mut current,
+        lifted_origin,
+        travel_speed,
+        travel_feed,
+    );
 
     gcode_lines.push("G28 X Y".to_owned());
+    current = lifted_origin;
 
     let mut stroke_count = 0;
+    let mut active_feed_rate = None;
 
     for polyline in prepared.polylines.iter().filter(|polyline| polyline.len() >= 2) {
         stroke_count += 1;
@@ -66,25 +64,16 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
         }
 
         let lowered = vec3(start.x, start.y, 0.0);
-        if current.distance_squared(lowered) > 1e-6 {
-            push_segment(
-                &mut segments,
-                &mut segment_end_times_s,
-                current,
-                lowered,
-                MotionKind::Travel,
-                travel_speed,
-            );
-            push_g1_move(
-                &mut gcode_lines,
-                &mut active_feed_rate,
-                travel_feed,
-                None,
-                None,
-                Some(lowered.z),
-            );
-            current = lowered;
-        }
+        push_relative_z_motion_if_needed(
+            &mut segments,
+            &mut segment_end_times_s,
+            &mut gcode_lines,
+            &mut current,
+            lowered,
+            travel_speed,
+            travel_feed,
+        );
+        active_feed_rate = None;
 
         for point in polyline.iter().skip(1) {
             let next = vec3(point.x, point.y, 0.0);
@@ -112,25 +101,16 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
         }
 
         let raised = vec3(current.x, current.y, lift);
-        if current.distance_squared(raised) > 1e-6 {
-            push_segment(
-                &mut segments,
-                &mut segment_end_times_s,
-                current,
-                raised,
-                MotionKind::Travel,
-                travel_speed,
-            );
-            push_g1_move(
-                &mut gcode_lines,
-                &mut active_feed_rate,
-                travel_feed,
-                None,
-                None,
-                Some(lift),
-            );
-            current = raised;
-        }
+        push_relative_z_motion_if_needed(
+            &mut segments,
+            &mut segment_end_times_s,
+            &mut gcode_lines,
+            &mut current,
+            raised,
+            travel_speed,
+            travel_feed,
+        );
+        active_feed_rate = None;
     }
 
     gcode_lines.push("M400".to_owned());
@@ -161,6 +141,29 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
         warnings: prepared.warnings,
         stats,
     }
+}
+
+fn push_relative_z_motion_if_needed(
+    segments: &mut Vec<MotionSegment>,
+    segment_end_times_s: &mut Vec<f32>,
+    gcode_lines: &mut Vec<String>,
+    current: &mut glam::Vec3,
+    end: glam::Vec3,
+    speed_mm_s: f32,
+    feed_rate_mm_min: f32,
+) {
+    if current.distance_squared(end) <= 1e-6 {
+        return;
+    }
+
+    debug_assert!((current.x - end.x).abs() <= 1e-6);
+    debug_assert!((current.y - end.y).abs() <= 1e-6);
+
+    push_segment(segments, segment_end_times_s, *current, end, MotionKind::Travel, speed_mm_s);
+    gcode_lines.push("G91".to_owned());
+    gcode_lines.push(format!("G1 Z{:.3} F{:.0}", end.z - current.z, feed_rate_mm_min.round()));
+    gcode_lines.push("G90".to_owned());
+    *current = end;
 }
 
 fn push_g1_move(
@@ -234,8 +237,15 @@ mod tests {
 
         assert_eq!(plan.gcode_lines[2], "G21");
         assert_eq!(plan.gcode_lines[3], "G90");
-        assert!(plan.gcode_lines[4].starts_with("G1 Z2.000"));
-        assert_eq!(plan.gcode_lines[5], "G28 X Y");
+        assert_eq!(plan.gcode_lines[4], "G91");
+        assert_eq!(plan.gcode_lines[5], "G1 Z2.000 F3000");
+        assert_eq!(plan.gcode_lines[6], "G90");
+        assert_eq!(plan.gcode_lines[7], "G28 X Y");
+        assert_eq!(plan.gcode_lines[8], "G1 X10.00 Y10.00 F3000");
+        assert_eq!(plan.gcode_lines[9], "G91");
+        assert_eq!(plan.gcode_lines[10], "G1 Z-2.000 F3000");
+        assert_eq!(plan.gcode_lines[11], "G90");
+        assert_eq!(plan.gcode_lines[12], "G1 X40.00 Y10.00 F1500");
     }
 
     #[test]

@@ -688,6 +688,8 @@ impl eframe::App for PenarticApp {
 
         if self.preview_playing {
             ctx.request_repaint_after(Duration::from_millis(16));
+        } else if self.device.needs_poll() {
+            ctx.request_repaint_after(Duration::from_millis(100));
         } else if self.device.is_connected() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }

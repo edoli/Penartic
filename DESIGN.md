@@ -36,7 +36,8 @@ The product must remain useful even when no device is connected:
 
 - continuous drawing moves stay on the XY plane at `Z = 0`
 - travel moves lift the pen by the configured Z lift amount
-- generated jobs start by lifting Z and then homing XY before drawing begins
+- generated jobs start by lifting Z with a relative move, homing XY, moving to the first drawing point while lifted, lowering Z with a relative move, and then drawing
+- drawing moves within a stroke are emitted as continuous `G1` XY moves without synchronization barriers between segments
 
 ## 3. Runtime architecture
 
@@ -93,11 +94,13 @@ updated with the same value to avoid WGPU validation errors.
 - serial support is native-only and uses `serialport`
 - the device controller keeps the app usable when no port is available
 - firmware/build-volume probing is intentionally best-effort because printer responses vary by firmware
+- native connection probing sends `M115`, `M503`, and `M211`; Marlin `M211` `Min:`/`Max:` reports are used to detect printable width and height when `M503` does not include build volume
 - if device probing fails, the manually configured printable area remains authoritative
 - detected printable area changes are applied only when the reported size actually changes, to avoid redundant rebuild churn
 - printing state is tracked explicitly so start/stop/connect/disconnect controls can be enabled only when valid
+- the UI keeps polling the native serial worker while a device is connected or connecting, so asynchronous probe responses can update settings after the initial click frame
 - direct jog/home controls send synchronized metric movement commands for XY and Z when no print job is active
-- the serial worker keeps many G-code lines in flight, batches writes, and does not flush the serial port after every line, so typical planner-based firmware can move more smoothly than a strict one-line-at-a-time stream
+- the serial worker strips comments before transmission, keeps a bounded set of acknowledged G-code lines in flight, and never treats read timeouts as acknowledgements
 
 ## 7. SVG conversion pipeline
 
