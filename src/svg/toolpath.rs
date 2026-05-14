@@ -23,7 +23,7 @@ pub struct PreparedSvg {
 #[derive(Debug, Clone)]
 pub struct ParsedSvg {
     pub source_name: String,
-    raw_strokes: Vec<RawStroke>,
+    strokes: Vec<SvgIrStroke>,
     pub warnings: Vec<String>,
     bounds: SourceBounds,
 }
@@ -96,12 +96,12 @@ pub fn parse_svg(
         );
     }
 
-    Ok(ParsedSvg {
-        source_name,
-        raw_strokes,
-        warnings,
-        bounds: SourceBounds { min, max, size: source_size },
-    })
+    let bounds = SourceBounds { min, max, size: source_size };
+    let mut strokes = strokes_in_source_drawing_space(&raw_strokes, bounds);
+    strokes.retain(|stroke| !stroke.is_empty());
+    optimize_stroke_order(&mut strokes);
+
+    Ok(ParsedSvg { source_name, strokes, warnings, bounds })
 }
 
 pub fn prepare_svg(
@@ -115,26 +115,8 @@ pub fn prepare_svg(
     let drawing_bounds = parsed.drawing_size_for(placement);
     let drawing_origin = placement.drawing_origin(drawing_bounds);
 
-    let map = |point: Vec2| {
-        vec2(
-            (point.x - parsed.bounds.min.x) * placement.scale_mm_per_unit + drawing_origin.x,
-            (parsed.bounds.max.y - point.y) * placement.scale_mm_per_unit + drawing_origin.y,
-        )
-    };
-
-    let mut strokes = Vec::new();
-    for raw_stroke in &parsed.raw_strokes {
-        let transformed = raw_stroke.stroke.transformed(map);
-        if let Some(dash_pattern) = &raw_stroke.dash_pattern {
-            strokes.extend(
-                transformed.apply_dash_pattern(&dash_pattern.scaled(placement.scale_mm_per_unit)),
-            );
-        } else {
-            strokes.push(transformed);
-        }
-    }
-    strokes.retain(|stroke| !stroke.is_empty());
-    optimize_stroke_order(&mut strokes);
+    let map = |point: Vec2| point * placement.scale_mm_per_unit + drawing_origin;
+    let strokes = parsed.strokes.iter().map(|stroke| stroke.transformed(map)).collect();
 
     PreparedSvg {
         source_name: parsed.source_name.clone(),
@@ -144,6 +126,25 @@ pub fn prepare_svg(
         drawing_bounds,
         is_out_of_bounds: drawing_out_of_bounds(drawing_origin, drawing_bounds, printable_area),
     }
+}
+
+fn strokes_in_source_drawing_space(
+    raw_strokes: &[RawStroke],
+    bounds: SourceBounds,
+) -> Vec<SvgIrStroke> {
+    let map = |point: Vec2| vec2(point.x - bounds.min.x, bounds.max.y - point.y);
+    let mut strokes = Vec::new();
+
+    for raw_stroke in raw_strokes {
+        let transformed = raw_stroke.stroke.transformed(map);
+        if let Some(dash_pattern) = &raw_stroke.dash_pattern {
+            strokes.extend(transformed.apply_dash_pattern(dash_pattern));
+        } else {
+            strokes.push(transformed);
+        }
+    }
+
+    strokes
 }
 
 fn optimize_stroke_order(strokes: &mut Vec<SvgIrStroke>) {

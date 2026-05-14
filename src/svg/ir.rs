@@ -419,14 +419,6 @@ impl DashPattern {
         Some(Self { pattern: cleaned, offset })
     }
 
-    pub fn scaled(&self, scale: f32) -> Self {
-        let scale = scale.max(SEGMENT_EPSILON);
-        Self {
-            pattern: self.pattern.iter().map(|entry| entry * scale).collect(),
-            offset: self.offset * scale,
-        }
-    }
-
     fn total_length(&self) -> f32 {
         self.pattern.iter().sum()
     }
