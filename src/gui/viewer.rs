@@ -158,13 +158,7 @@ impl PreviewRenderer {
             .unwrap_or(220.0);
         state.handle_input(&response, ui, scene_extent);
 
-        ui.painter().rect_filled(rect, 10.0, colors::preview_background());
-        ui.painter().rect_stroke(
-            rect,
-            10.0,
-            egui::Stroke::new(1.0, colors::preview_border()),
-            egui::StrokeKind::Outside,
-        );
+        ui.painter().rect_filled(rect, 0.0, colors::preview_background());
 
         if !self.ready {
             ui.painter().text(
