@@ -20,7 +20,7 @@ The product must remain useful even when no device is connected:
 2. Set printable width, printable height, draw speed, and Z lift height from the left sidebar.
 3. Load an SVG file.
 4. Convert the SVG into a sampled toolpath and G-code.
-5. Inspect the result through the timeline slider and 3D preview.
+5. Show the completed result immediately in the 3D preview, then scrub backward or replay it with the timeline slider.
 6. Copy the generated G-code if needed.
 
 ### 2.2 Connected workflow
@@ -41,14 +41,14 @@ The product must remain useful even when no device is connected:
 
 | Module | Responsibility |
 | --- | --- |
-| `src/app.rs` | Main egui application state, sidebar UI, SVG loading, playback controls, device actions |
-| `src/svg_toolpath.rs` | Parse SVG with `usvg`, flatten path segments into polylines, normalize into printable space |
-| `src/gcode.rs` | Convert sampled polylines into travel/draw motion segments and G-code |
-| `src/model.rs` | Shared settings, motion, and toolpath data structures |
-| `src/viewer.rs` | Custom WGPU paint callback for the bed, pen mesh, and timeline-aware motion preview |
-| `src/device.rs` | Native serial probing and streaming, plus native/web capability split |
-| `src/fonts.rs` | Native fallback CJK font discovery and deferred font loading |
-| `src/crash.rs` | Native panic hook and runtime error log persistence |
+| `src/gui/app.rs` | Main egui application state, sidebar UI, SVG loading, playback controls, and layout wiring |
+| `src/gui/viewer.rs` | Custom WGPU paint callback for the bed, pen mesh, and timeline-aware motion preview |
+| `src/gui/fonts.rs` | Native fallback CJK font discovery and deferred font loading |
+| `src/svg/toolpath.rs` | Parse SVG with `usvg`, flatten path segments into polylines, normalize into printable space |
+| `src/plot/gcode.rs` | Convert sampled polylines into travel/draw motion segments and G-code |
+| `src/plot/model.rs` | Shared settings, motion, and toolpath data structures |
+| `src/platform/device.rs` | Native serial probing and streaming, plus native/web capability split |
+| `src/platform/crash.rs` | Native panic hook and runtime error log persistence |
 | `src/lib.rs` / `src/main.rs` | Native/web bootstrap and platform-specific startup configuration |
 
 ## 4. Rendering design
@@ -56,7 +56,7 @@ The product must remain useful even when no device is connected:
 ### 4.1 UI layout
 
 - left sidebar: device controls, editable print settings, job stats, warnings, logs
-- central panel: 3D preview canvas, playback controls, timeline slider
+- central panel: preview title, 3D preview canvas, and a bottom control band reserved for playback buttons plus the timeline slider
 
 ### 4.2 3D preview
 

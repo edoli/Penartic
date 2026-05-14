@@ -8,7 +8,7 @@ use eframe::{
 };
 use glam::{Mat4, Vec3, vec3};
 
-use crate::model::{MotionKind, MotionSegment, ToolpathPlan};
+use crate::plot::model::{MotionKind, MotionSegment, ToolpathPlan};
 
 #[derive(Debug, Clone)]
 pub struct ViewportState {
@@ -131,11 +131,12 @@ impl PreviewRenderer {
     pub fn show(
         &self,
         ui: &mut egui::Ui,
+        desired_size: egui::Vec2,
         plan: Option<&ToolpathPlan>,
         progress: f32,
         state: &mut ViewportState,
     ) {
-        let desired = egui::vec2(ui.available_width().max(320.0), ui.available_height().max(260.0));
+        let desired = egui::vec2(desired_size.x.max(1.0), desired_size.y.max(1.0));
         let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::drag());
         state.handle_input(&response, ui);
 

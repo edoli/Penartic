@@ -1,15 +1,11 @@
-mod app;
-mod crash;
-mod device;
-mod fonts;
-mod gcode;
-mod model;
-mod svg_toolpath;
-mod viewer;
+mod gui;
+mod platform;
+mod plot;
+mod svg;
 
-use app::PenarticApp;
+use gui::app::PenarticApp;
 
-pub use app::PenarticApp as App;
+pub use gui::app::PenarticApp as App;
 
 #[cfg(not(target_arch = "wasm32"))]
 const NATIVE_PREVIEW_MSAA_SAMPLES: u32 = 4;
@@ -18,7 +14,7 @@ const WEB_PREVIEW_MSAA_SAMPLES: u32 = 1;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_native() -> eframe::Result {
-    crash::install_crash_logging();
+    platform::crash::install_crash_logging();
 
     let preview_msaa_samples = NATIVE_PREVIEW_MSAA_SAMPLES;
     let native_options = eframe::NativeOptions {
@@ -38,7 +34,7 @@ pub fn run_native() -> eframe::Result {
     );
 
     if let Err(error) = &result {
-        crash::log_runtime_error("eframe::run_native", &error.to_string());
+        platform::crash::log_runtime_error("eframe::run_native", &error.to_string());
     }
 
     result

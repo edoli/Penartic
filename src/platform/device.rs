@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::model::PrintableArea;
+use crate::plot::model::PrintableArea;
 
 const DEVICE_LOG_LIMIT: usize = 48;
 

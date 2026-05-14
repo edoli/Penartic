@@ -2,7 +2,7 @@ use glam::{Vec2, vec2};
 use thiserror::Error;
 use usvg::{Node, Options, Tree, tiny_skia_path::PathSegment};
 
-use crate::model::PrintableArea;
+use crate::plot::model::PrintableArea;
 
 #[derive(Debug, Clone)]
 pub struct PreparedSvg {

@@ -1,15 +1,17 @@
 #[cfg(not(target_arch = "wasm32"))]
-use crate::fonts::{self, LoadedFallbackFonts};
+use super::fonts::{self, LoadedFallbackFonts};
 use std::time::Duration;
 
 use eframe::egui;
 
+use super::viewer::{PreviewRenderer, ViewportState};
 use crate::{
-    device::{ConnectionState, DeviceController},
-    gcode,
-    model::{PrintableArea, ToolSettings, ToolpathPlan},
-    svg_toolpath,
-    viewer::{PreviewRenderer, ViewportState},
+    platform::device::{ConnectionState, DeviceController},
+    plot::{
+        gcode,
+        model::{PrintableArea, ToolSettings, ToolpathPlan},
+    },
+    svg::toolpath,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -118,14 +120,11 @@ impl PenarticApp {
             return;
         };
 
-        match svg_toolpath::prepare_svg(
-            svg.file_name.clone(),
-            &svg.bytes,
-            self.settings.printable_area,
-        ) {
+        match toolpath::prepare_svg(svg.file_name.clone(), &svg.bytes, self.settings.printable_area)
+        {
             Ok(prepared) => {
                 self.toolpath_plan = Some(gcode::build_plan(prepared, &self.settings));
-                self.preview_progress = 0.0;
+                self.preview_progress = 1.0;
                 self.preview_playing = false;
                 self.error_message = None;
             }
@@ -354,51 +353,63 @@ impl PenarticApp {
 
     fn show_central_panel(&mut self, root_ui: &mut egui::Ui) {
         egui::CentralPanel::default().show_inside(root_ui, |ui| {
+            egui::Panel::bottom("preview-controls").resizable(false).exact_size(84.0).show_inside(
+                ui,
+                |ui| {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let toggle_label =
+                            if self.preview_playing { "일시정지" } else { "재생" };
+                        if ui
+                            .add_enabled(
+                                self.toolpath_plan.is_some(),
+                                egui::Button::new(toggle_label),
+                            )
+                            .clicked()
+                        {
+                            if self.preview_progress >= 1.0 {
+                                self.preview_progress = 0.0;
+                            }
+                            self.preview_playing = !self.preview_playing;
+                        }
+
+                        if ui
+                            .add_enabled(
+                                self.toolpath_plan.is_some(),
+                                egui::Button::new("처음으로"),
+                            )
+                            .clicked()
+                        {
+                            self.preview_progress = 0.0;
+                            self.preview_playing = false;
+                        }
+
+                        ui.label(format!("{:.0}%", self.preview_progress * 100.0));
+                    });
+
+                    let slider = egui::Slider::new(&mut self.preview_progress, 0.0..=1.0)
+                        .show_value(false)
+                        .text("타임라인");
+                    if ui.add_enabled(self.toolpath_plan.is_some(), slider).changed() {
+                        self.preview_playing = false;
+                    }
+                },
+            );
+
             ui.heading("3D 미리보기");
             ui.label("드래그로 회전하고 마우스 휠로 확대/축소할 수 있습니다.");
             ui.add_space(8.0);
-
-            let available_height = (ui.available_height() - 96.0).max(260.0);
             egui::Frame::canvas(ui.style()).show(ui, |ui| {
-                ui.set_min_height(available_height);
+                let preview_size = egui::vec2(ui.available_width(), ui.available_height());
+                ui.set_min_height(preview_size.y.max(1.0));
                 self.preview_renderer.show(
                     ui,
+                    preview_size,
                     self.toolpath_plan.as_ref(),
                     self.preview_progress,
                     &mut self.viewport_state,
                 );
             });
-
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                let toggle_label = if self.preview_playing { "일시정지" } else { "재생" };
-                if ui
-                    .add_enabled(self.toolpath_plan.is_some(), egui::Button::new(toggle_label))
-                    .clicked()
-                {
-                    if self.preview_progress >= 1.0 {
-                        self.preview_progress = 0.0;
-                    }
-                    self.preview_playing = !self.preview_playing;
-                }
-
-                if ui
-                    .add_enabled(self.toolpath_plan.is_some(), egui::Button::new("처음으로"))
-                    .clicked()
-                {
-                    self.preview_progress = 0.0;
-                    self.preview_playing = false;
-                }
-
-                ui.label(format!("{:.0}%", self.preview_progress * 100.0));
-            });
-
-            let slider = egui::Slider::new(&mut self.preview_progress, 0.0..=1.0)
-                .show_value(false)
-                .text("타임라인");
-            if ui.add_enabled(self.toolpath_plan.is_some(), slider).changed() {
-                self.preview_playing = false;
-            }
         });
     }
 }

@@ -1,8 +1,8 @@
 use glam::vec3;
 
 use crate::{
-    model::{MotionKind, MotionSegment, ToolSettings, ToolpathPlan, ToolpathStats},
-    svg_toolpath::PreparedSvg,
+    plot::model::{MotionKind, MotionSegment, ToolSettings, ToolpathPlan, ToolpathStats},
+    svg::toolpath::PreparedSvg,
 };
 
 pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPlan {
@@ -104,8 +104,8 @@ mod tests {
     use glam::vec2;
 
     use super::*;
-    use crate::model::{PrintableArea, ToolSettings};
-    use crate::svg_toolpath::PreparedSvg;
+    use crate::plot::model::{PrintableArea, ToolSettings};
+    use crate::svg::toolpath::PreparedSvg;
 
     #[test]
     fn generated_gcode_lifts_then_homes_xy() {
