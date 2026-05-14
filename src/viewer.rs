@@ -32,7 +32,7 @@ impl ViewportState {
         }
 
         if response.hovered() {
-            let scroll = ui.input(|input| input.raw_scroll_delta.y);
+            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
             if scroll.abs() > f32::EPSILON {
                 self.zoom = (self.zoom * (1.0 - scroll * 0.0015)).clamp(0.55, 2.4);
             }
@@ -45,12 +45,13 @@ pub struct PreviewRenderer {
 }
 
 impl PreviewRenderer {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, msaa_samples: u32) -> Self {
         let Some(render_state) = cc.wgpu_render_state.as_ref() else {
             return Self { ready: false };
         };
 
         let device = &render_state.device;
+        let sample_count = msaa_samples.max(1);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("penartic-preview-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("preview_shader.wgsl").into()),
@@ -83,8 +84,8 @@ impl PreviewRenderer {
                 ..Default::default()
             },
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multisample: wgpu::MultisampleState { count: sample_count, ..Default::default() },
+            multiview_mask: None,
             cache: None,
         });
 
@@ -108,8 +109,8 @@ impl PreviewRenderer {
                 ..Default::default()
             },
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multisample: wgpu::MultisampleState { count: sample_count, ..Default::default() },
+            multiview_mask: None,
             cache: None,
         });
 

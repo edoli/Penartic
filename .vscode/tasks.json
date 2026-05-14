@@ -1,0 +1,76 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cargo fmt",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "fmt"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "cargo build",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "build"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "cargo test",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "test"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "cargo test sample svgs",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "test",
+        "loads_all_sample_svg_assets_from_repository"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "cargo build (web)",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "build",
+        "--target",
+        "wasm32-unknown-unknown"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "trunk serve",
+      "type": "shell",
+      "command": "trunk",
+      "args": [
+        "serve",
+        "--open"
+      ],
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}

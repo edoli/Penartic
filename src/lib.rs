@@ -1,5 +1,7 @@
 mod app;
+mod crash;
 mod device;
+mod fonts;
 mod gcode;
 mod model;
 mod svg_toolpath;
@@ -10,10 +12,18 @@ use app::PenarticApp;
 pub use app::PenarticApp as App;
 
 #[cfg(not(target_arch = "wasm32"))]
+const NATIVE_PREVIEW_MSAA_SAMPLES: u32 = 4;
+#[cfg(target_arch = "wasm32")]
+const WEB_PREVIEW_MSAA_SAMPLES: u32 = 1;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_native() -> eframe::Result {
+    crash::install_crash_logging();
+
+    let preview_msaa_samples = NATIVE_PREVIEW_MSAA_SAMPLES;
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
-        multisampling: 4,
+        multisampling: preview_msaa_samples as u16,
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 920.0])
             .with_min_inner_size([1100.0, 720.0])
@@ -21,11 +31,17 @@ pub fn run_native() -> eframe::Result {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "Penartic",
         native_options,
-        Box::new(|cc| Ok(Box::new(PenarticApp::new(cc)))),
-    )
+        Box::new(move |cc| Ok(Box::new(PenarticApp::new(cc, preview_msaa_samples)))),
+    );
+
+    if let Err(error) = &result {
+        crash::log_runtime_error("eframe::run_native", &error.to_string());
+    }
+
+    result
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -45,9 +61,14 @@ pub fn start_web() -> Result<(), wasm_bindgen::JsValue> {
             .expect("penartic-canvas should be a canvas element");
 
         let web_options = eframe::WebOptions::default();
+        let preview_msaa_samples = WEB_PREVIEW_MSAA_SAMPLES;
 
         eframe::WebRunner::new()
-            .start(canvas, web_options, Box::new(|cc| Ok(Box::new(PenarticApp::new(cc)))))
+            .start(
+                canvas,
+                web_options,
+                Box::new(move |cc| Ok(Box::new(PenarticApp::new(cc, preview_msaa_samples)))),
+            )
             .await
             .expect("failed to start Penartic web app");
     });

@@ -4,11 +4,17 @@ use eframe::egui;
 
 use crate::{
     device::{ConnectionState, DeviceController},
-    gcode,
+    fonts, gcode,
     model::{PrintableArea, ToolSettings, ToolpathPlan},
     svg_toolpath,
     viewer::{PreviewRenderer, ViewportState},
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::fonts::LoadedFallbackFonts;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::{self, TryRecvError};
 
 #[cfg(target_arch = "wasm32")]
 use poll_promise::Promise;
@@ -25,6 +31,8 @@ pub struct PenarticApp {
     preview_progress: f32,
     preview_playing: bool,
     error_message: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pending_fallback_fonts: Option<mpsc::Receiver<LoadedFallbackFonts>>,
     #[cfg(target_arch = "wasm32")]
     pending_svg_pick: Option<Promise<Option<PickedWebSvg>>>,
 }
@@ -43,7 +51,7 @@ struct PickedWebSvg {
 }
 
 impl PenarticApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, preview_msaa_samples: u32) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
 
         let mut device = DeviceController::new();
@@ -52,13 +60,15 @@ impl PenarticApp {
         Self {
             settings: ToolSettings::default(),
             device,
-            preview_renderer: PreviewRenderer::new(cc),
+            preview_renderer: PreviewRenderer::new(cc, preview_msaa_samples),
             viewport_state: ViewportState::default(),
             loaded_svg: None,
             toolpath_plan: None,
             preview_progress: 0.0,
             preview_playing: false,
             error_message: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            pending_fallback_fonts: fonts::spawn_fallback_font_loader(),
             #[cfg(target_arch = "wasm32")]
             pending_svg_pick: None,
         }
@@ -149,6 +159,27 @@ impl PenarticApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn handle_web_file_pick(&mut self) {}
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn handle_fallback_fonts(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.pending_fallback_fonts.as_ref() else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(loaded_fonts) => {
+                fonts::apply_fallback_fonts(ctx, loaded_fonts);
+                self.pending_fallback_fonts = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.pending_fallback_fonts = None;
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn handle_fallback_fonts(&mut self, _ctx: &egui::Context) {}
+
     fn update_preview_playback(&mut self, ctx: &egui::Context) {
         if !self.preview_playing || self.toolpath_plan.is_none() {
             return;
@@ -162,9 +193,9 @@ impl PenarticApp {
         }
     }
 
-    fn show_sidebar(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("settings-sidebar").resizable(false).exact_width(320.0).show(
-            ctx,
+    fn show_sidebar(&mut self, root_ui: &mut egui::Ui) {
+        egui::Panel::left("settings-sidebar").resizable(false).exact_size(320.0).show_inside(
+            root_ui,
             |ui| {
                 ui.heading("Penartic");
                 ui.label("SVG를 G-code로 변환하고, 오프라인/장치 연결 모드를 모두 지원합니다.");
@@ -322,8 +353,8 @@ impl PenarticApp {
         );
     }
 
-    fn show_central_panel(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn show_central_panel(&mut self, root_ui: &mut egui::Ui) {
+        egui::CentralPanel::default().show_inside(root_ui, |ui| {
             ui.heading("3D 미리보기");
             ui.label("드래그로 회전하고 마우스 휠로 확대/축소할 수 있습니다.");
             ui.add_space(8.0);
@@ -374,13 +405,11 @@ impl PenarticApp {
 }
 
 impl eframe::App for PenarticApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_web_file_pick();
+        self.handle_fallback_fonts(ctx);
         self.handle_device_updates();
         self.update_preview_playback(ctx);
-
-        self.show_sidebar(ctx);
-        self.show_central_panel(ctx);
 
         if self.preview_playing {
             ctx.request_repaint_after(Duration::from_millis(16));
@@ -392,6 +421,16 @@ impl eframe::App for PenarticApp {
         if self.pending_svg_pick.is_some() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.pending_fallback_fonts.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.show_sidebar(ui);
+        self.show_central_panel(ui);
     }
 }
 

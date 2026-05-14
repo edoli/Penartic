@@ -2,17 +2,17 @@
 name = "penartic"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.92"
 
 [lib]
 name = "penartic_app"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-bytemuck = { version = "1.24.0", features = ["derive"] }
-eframe = { version = "0.33.3", features = ["wgpu"] }
+bytemuck = { version = "1.25.0", features = ["derive"] }
+eframe = { version = "0.34.2", features = ["wgpu"] }
 glam = "0.32.1"
-log = "0.4.28"
+log = "0.4.29"
 poll-promise = { version = "0.3.0", features = ["web"] }
 rfd = "0.17.2"
 serde = { version = "1.0.228", features = ["derive"] }

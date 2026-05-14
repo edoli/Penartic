@@ -1,0 +1,39 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Penartic (native, Windows)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}\\target\\debug\\penartic.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "RUST_BACKTRACE",
+          "value": "1"
+        }
+      ],
+      "console": "integratedTerminal",
+      "preLaunchTask": "cargo build"
+    },
+    {
+      "name": "Penartic (native, macOS/Linux)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/penartic",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_BACKTRACE": "1"
+      },
+      "preLaunchTask": "cargo build"
+    },
+    {
+      "name": "Penartic (web)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "trunk serve --open"
+    }
+  ]
+}

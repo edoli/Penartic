@@ -255,6 +255,7 @@ fn cubic(start: Vec2, control_a: Vec2, control_b: Vec2, end: Vec2, t: f32) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, path::Path};
 
     #[test]
     fn prepares_simple_svg_into_centered_points() {
@@ -274,5 +275,43 @@ mod tests {
         assert!(polyline[1].y >= 0.0 && polyline[1].y <= 60.0);
         assert!(prepared.drawing_bounds.x <= 100.0 + f32::EPSILON);
         assert!(prepared.drawing_bounds.y <= 60.0 + f32::EPSILON);
+    }
+
+    #[test]
+    fn loads_all_sample_svg_assets_from_repository() {
+        let sample_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("sample");
+        let entries = fs::read_dir(&sample_dir).unwrap_or_else(|error| {
+            panic!("failed to read sample dir {}: {error}", sample_dir.display())
+        });
+
+        let mut loaded_svg_count = 0;
+
+        for entry in entries {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("svg") {
+                continue;
+            }
+
+            let bytes = fs::read(&path).unwrap_or_else(|error| {
+                panic!("failed to read sample SVG {}: {error}", path.display())
+            });
+            let file_name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+
+            prepare_svg(file_name, &bytes, PrintableArea::default()).unwrap_or_else(|error| {
+                panic!("failed to load sample SVG {}: {error}", path.display())
+            });
+
+            loaded_svg_count += 1;
+        }
+
+        assert!(
+            loaded_svg_count > 0,
+            "expected at least one sample SVG in {}",
+            sample_dir.display()
+        );
     }
 }
