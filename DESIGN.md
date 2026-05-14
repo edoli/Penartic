@@ -18,7 +18,7 @@ The product must remain useful even when no device is connected:
 ### 2.1 Offline workflow
 
 1. Start the app without a device.
-2. Set printable width, printable height, draw speed, Z lift height, optional G2/G3 or G5 output, and tangent-based corner-smoothing controls from the left sidebar. The default Z lift is 0.5 mm.
+2. Set printable width, printable height, draw speed, Z lift height, optional G2/G3 or G5 output, and tangent-based corner-smoothing controls from the left sidebar. The default Z lift is 1.0 mm.
 3. Load an SVG file through the file picker, drag-and-drop, or a native startup path used for validation.
 4. Start from the SVG's raw coordinate size interpreted as millimeters, centered once on load, then adjust SVG position and size from the left sidebar when needed.
 5. Convert the SVG into a reusable IR and then into preview motion plus G-code without automatically rescaling the existing SVG placement when printable area settings later change.
@@ -65,7 +65,7 @@ The product must remain useful even when no device is connected:
 ### 4.1 UI layout
 
 - left sidebar: fixed-width, vertically scrollable device controls, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
-- sidebar action buttons use a slightly taller shared height, paired device/job actions are laid out in evenly sized columns with explicit spacing, the print-start homing toggle sits directly under the print action row, long firmware text stays on one line with hover access to the full value, device logs remain left-aligned, advanced G2/G3, G5, and corner-smoothing controls can be toggled from settings, and sidebar content growth must not resize the 3D preview when the window size stays fixed
+- sidebar action buttons use a slightly taller shared height, paired device/job actions are laid out in evenly sized columns with explicit spacing, the print-start homing toggle sits directly under the print action row, long firmware text stays on one line with hover access to the full value, the upper sidebar controls scroll independently from a left-aligned device log section that fills the remaining sidebar height, advanced G2/G3, G5, and corner-smoothing controls can be toggled from settings, and sidebar content growth must not resize the 3D preview when the window size stays fixed
 - central panel: a full-size 3D preview canvas with a translucent bottom overlay for playback buttons and the full-width timeline slider so controls remain visible in smaller windows
 
 ### 4.2 3D preview
@@ -129,10 +129,12 @@ updated with the same value to avoid WGPU validation errors.
 6. On load, create a one-time centered default placement that interprets SVG coordinate units as millimeters instead of auto-fitting to the printable area.
 7. Reuse the user-controlled SVG placement for later rebuilds instead of auto-rescaling when printable area changes.
 8. Apply placement and dash splitting in IR space.
-9. Optionally replace sharp joins between adjacent primitives by comparing their end/start tangents and inserting a tiny rounded transition using a configurable radius and turn-angle threshold.
-10. Mark drawings that extend beyond the printable area so the UI and preview can warn/highlight them.
-11. Build preview motion segments with explicit travel lifts from the IR plus any generated rounded corners.
-12. Emit standard linear G-code, optional `G2`/`G3` arc commands for compatible rounded corners, and optional `G5` curve commands for preserved Bézier geometry or fallback rounded fillets from the same pipeline.
+9. Reorder placed strokes with a greedy nearest-endpoint pass and reverse individual strokes when
+   their end point is closer than their start point, reducing pen-up travel between SVG paths.
+10. Optionally replace sharp joins between adjacent primitives by comparing their end/start tangents and inserting a tiny rounded transition using a configurable radius and turn-angle threshold.
+11. Mark drawings that extend beyond the printable area so the UI and preview can warn/highlight them.
+12. Build preview motion segments with explicit travel lifts from the IR plus any generated rounded corners.
+13. Emit standard linear G-code, optional `G2`/`G3` arc commands for compatible rounded corners, and optional `G5` curve commands for preserved Bézier geometry or fallback rounded fillets from the same pipeline.
 
 Current non-goals:
 

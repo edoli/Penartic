@@ -133,6 +133,7 @@ pub fn prepare_svg(
         }
     }
     strokes.retain(|stroke| !stroke.is_empty());
+    optimize_stroke_order(&mut strokes);
 
     PreparedSvg {
         source_name: parsed.source_name.clone(),
@@ -142,6 +143,46 @@ pub fn prepare_svg(
         drawing_bounds,
         is_out_of_bounds: drawing_out_of_bounds(drawing_origin, drawing_bounds, printable_area),
     }
+}
+
+fn optimize_stroke_order(strokes: &mut Vec<SvgIrStroke>) {
+    let mut unordered = std::mem::take(strokes);
+    let mut ordered = Vec::with_capacity(unordered.len());
+    let mut current = Vec2::ZERO;
+
+    while !unordered.is_empty() {
+        let Some((best_index, reverse)) = nearest_stroke(&unordered, current) else {
+            break;
+        };
+
+        let stroke = unordered.swap_remove(best_index);
+        let stroke = if reverse { stroke.reversed() } else { stroke };
+        if let Some(end) = stroke.end_point() {
+            current = end;
+        }
+        ordered.push(stroke);
+    }
+
+    *strokes = ordered;
+}
+
+fn nearest_stroke(strokes: &[SvgIrStroke], current: Vec2) -> Option<(usize, bool)> {
+    strokes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, stroke)| {
+            let start = stroke.start_point()?;
+            let end = stroke.end_point()?;
+            let start_distance = current.distance_squared(start);
+            let end_distance = current.distance_squared(end);
+            if end_distance < start_distance {
+                Some((index, true, end_distance))
+            } else {
+                Some((index, false, start_distance))
+            }
+        })
+        .min_by(|left, right| left.2.total_cmp(&right.2))
+        .map(|(index, reverse, _)| (index, reverse))
 }
 
 fn collect_group(group: &usvg::Group, strokes: &mut Vec<RawStroke>, flags: &mut WarningFlags) {
@@ -396,6 +437,52 @@ mod tests {
         assert!((first.last().unwrap().x - 58.0).abs() < 0.05);
         assert!((second.first().unwrap().x - 60.0).abs() < 0.05);
         assert!((second.last().unwrap().x - 64.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn reorders_strokes_by_nearest_endpoint_after_placement() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 1">
+                <path d="M 90 0 L 100 0" />
+                <path d="M 0 0 L 10 0" />
+                <path d="M 12 0 L 20 0" />
+            </svg>
+        "#;
+
+        let parsed = parse_svg("unordered.svg", svg).unwrap();
+        let prepared = prepare_svg(
+            &parsed,
+            SvgPlacement::new(vec2(50.0, 0.0), 1.0),
+            PrintableArea::new(120.0, 20.0),
+        );
+
+        let starts = prepared
+            .strokes
+            .iter()
+            .map(|stroke| stroke.start_point().unwrap().x)
+            .collect::<Vec<_>>();
+
+        assert_eq!(starts, vec![0.0, 12.0, 90.0]);
+    }
+
+    #[test]
+    fn reverses_stroke_when_its_end_is_closer_to_current_position() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 1">
+                <path d="M 20 0 L 10 0" />
+            </svg>
+        "#;
+
+        let parsed = parse_svg("reverse.svg", svg).unwrap();
+        let prepared = prepare_svg(
+            &parsed,
+            SvgPlacement::new(vec2(10.0, 0.0), 1.0),
+            PrintableArea::new(40.0, 20.0),
+        );
+        let polyline = flatten_stroke_to_polyline(&prepared.strokes[0]);
+
+        assert_eq!(polyline[0], vec2(5.0, 0.0));
+        assert_eq!(polyline[1], vec2(15.0, 0.0));
     }
 
     #[test]

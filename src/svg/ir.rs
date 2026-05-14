@@ -24,14 +24,16 @@ impl SvgIrStroke {
         self.segments.is_empty()
     }
 
-    #[cfg(test)]
     pub fn start_point(&self) -> Option<Vec2> {
         self.segments.first().map(SvgIrSegment::start_point)
     }
 
-    #[cfg(test)]
     pub fn end_point(&self) -> Option<Vec2> {
         self.segments.last().map(SvgIrSegment::end_point)
+    }
+
+    pub fn reversed(&self) -> Self {
+        Self { segments: self.segments.iter().rev().map(SvgIrSegment::reversed).collect() }
     }
 
     pub fn transformed(&self, map: impl Fn(Vec2) -> Vec2 + Copy) -> Self {
@@ -143,6 +145,18 @@ impl SvgIrSegment {
                 map(segment.control_b),
                 map(segment.end),
             ),
+        }
+    }
+
+    pub fn reversed(&self) -> Self {
+        match self {
+            Self::Line(segment) => Self::line(segment.end, segment.start),
+            Self::Quadratic(segment) => {
+                Self::quadratic(segment.end, segment.control, segment.start)
+            }
+            Self::Cubic(segment) => {
+                Self::cubic(segment.end, segment.control_b, segment.control_a, segment.start)
+            }
         }
     }
 

@@ -305,9 +305,9 @@ mod tests {
     }
 
     #[test]
-    fn default_settings_use_short_lift_and_direct_start() {
+    fn default_settings_use_one_mm_lift_and_direct_start() {
         let settings = ToolSettings::default();
-        assert_eq!(settings.lift_height_mm, 0.5);
+        assert_eq!(settings.lift_height_mm, 1.0);
         assert_eq!(settings.print_start_mode, PrintStartMode::DirectFromCurrentPosition);
     }
 }
