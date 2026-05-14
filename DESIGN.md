@@ -50,6 +50,7 @@ The product must remain useful even when no device is connected:
 | `src/plot/model.rs` | Shared settings, motion, and toolpath data structures |
 | `src/platform/device.rs` | Native serial probing and streaming, plus native/web capability split |
 | `src/platform/crash.rs` | Native panic hook and runtime error log persistence |
+| `src/validation.rs` | Native UI screenshot validation wrapper that captures the egui viewport after a delay |
 | `src/res/colors.rs` | Shared UI and preview color tokens |
 | `src/lib.rs` / `src/main.rs` | Native/web bootstrap and platform-specific startup configuration |
 
@@ -58,6 +59,7 @@ The product must remain useful even when no device is connected:
 ### 4.1 UI layout
 
 - left sidebar: fixed-width device controls, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
+- sidebar action buttons use a slightly taller shared height, and paired device/job actions are laid out in evenly sized columns with explicit spacing
 - central panel: preview title, 3D preview canvas, and a bottom control band reserved for playback buttons plus a full-width timeline slider
 
 ### 4.2 3D preview
@@ -130,7 +132,7 @@ Current non-goals:
 - native validation: `cargo build`, `cargo test`
 - web validation: `cargo build --target wasm32-unknown-unknown`
 - SVG regression validation: load every file under `sample\*.svg` through the test suite
-- native visual validation: launch the app with `sample\sample1.svg`, wait briefly, capture a screenshot, and inspect it for obvious layout or rendering anomalies
+- native visual validation: run `cargo run --bin ui_screenshot_validation -- --svg sample\sample1.svg --out target\validation\ui-validation.png --delay-seconds 2`, then inspect the generated screenshot for obvious layout or rendering anomalies
 - VS Code launch strategy:
   - Windows native debugging uses `cppvsdbg`
   - macOS/Linux native debugging uses `lldb`
@@ -149,5 +151,5 @@ Current non-goals:
 
 - sample SVG assets used for regression live under `sample\`
 - native crash logs are written to a platform-specific application log directory
-- repo-local VS Code tasks provide build, test, SVG regression, web build, and Windows screenshot validation entry points
+- repo-local VS Code tasks provide build, test, SVG regression, web build, and Rust-driven native screenshot validation entry points
 - the generated validation screenshot is currently written to `target\validation\ui-validation.png`

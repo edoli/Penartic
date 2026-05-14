@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 bytemuck = { version = "1.25.0", features = ["derive"] }
 eframe = { version = "0.34.2", features = ["wgpu"] }
 glam = "0.32.1"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 log = "0.4.29"
 poll-promise = { version = "0.3.0", features = ["web"] }
 rfd = "0.17.2"

@@ -62,6 +62,24 @@
       ]
     },
     {
+      "label": "ui screenshot validation",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "run",
+        "--bin",
+        "ui_screenshot_validation",
+        "--",
+        "--svg",
+        "${workspaceFolder}/sample/sample1.svg",
+        "--out",
+        "${workspaceFolder}/target/validation/ui-validation.png",
+        "--delay-seconds",
+        "2"
+      ],
+      "problemMatcher": []
+    },
+    {
       "label": "trunk serve",
       "type": "shell",
       "command": "trunk",

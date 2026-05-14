@@ -2380,6 +2380,7 @@ dependencies = [
  "console_error_panic_hook",
  "eframe",
  "glam",
+ "image",
  "log",
  "poll-promise",
  "rfd",

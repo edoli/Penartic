@@ -3,10 +3,14 @@ mod platform;
 mod plot;
 mod res;
 mod svg;
+#[cfg(not(target_arch = "wasm32"))]
+mod validation;
 
 use gui::app::PenarticApp;
 
 pub use gui::app::PenarticApp as App;
+#[cfg(not(target_arch = "wasm32"))]
+pub use validation::{NativeScreenshotValidationConfig, run_native_screenshot_validation};
 
 #[cfg(not(target_arch = "wasm32"))]
 const NATIVE_PREVIEW_MSAA_SAMPLES: u32 = 4;
