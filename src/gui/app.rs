@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use eframe::egui;
 
+use super::layout::{Size, UiLayoutExt};
 use super::viewer::{PreviewRenderer, ViewportState};
 use crate::{
     platform::device::{ConnectionState, DeviceController, PrintState},
@@ -23,7 +24,7 @@ use poll_promise::Promise;
 
 const SIDEBAR_WIDTH: f32 = 360.0;
 const PREVIEW_CONTROL_BAND_HEIGHT: f32 = 104.0;
-const CONTROL_BUTTON_WIDTH: f32 = 48.0;
+const CONTROL_BUTTON_WIDTH: f32 = 44.0;
 const CONTROL_BUTTON_HEIGHT: f32 = 44.0;
 const CONTROL_GRID_SPACING: f32 = 4.0;
 
@@ -294,37 +295,43 @@ impl PenarticApp {
                 |ui| {
                     ui.label("X/Y");
                     ui.separator();
-                    egui::Grid::new("xy-jog-grid").spacing(egui::vec2(4.0, 4.0)).show(ui, |ui| {
-                        spacer_button_cell(ui);
-                        if control_button(ui, "↑", can_control).clicked() {
-                            let result = self.device.jog_xy(0.0, self.jog_step_mm, jog_feed_rate);
-                            self.apply_device_action(result);
-                        }
-                        spacer_button_cell(ui);
-                        ui.end_row();
+                    egui::Grid::new("xy-jog-grid")
+                        .spacing(egui::vec2(CONTROL_GRID_SPACING, CONTROL_GRID_SPACING))
+                        .show(ui, |ui| {
+                            spacer_button_cell(ui);
+                            if control_button(ui, "↑", can_control).clicked() {
+                                let result =
+                                    self.device.jog_xy(0.0, self.jog_step_mm, jog_feed_rate);
+                                self.apply_device_action(result);
+                            }
+                            spacer_button_cell(ui);
+                            ui.end_row();
 
-                        if control_button(ui, "←", can_control).clicked() {
-                            let result = self.device.jog_xy(-self.jog_step_mm, 0.0, jog_feed_rate);
-                            self.apply_device_action(result);
-                        }
-                        if control_button(ui, "🏠", can_control).clicked() {
-                            let result = self.device.home_xy();
-                            self.apply_device_action(result);
-                        }
-                        if control_button(ui, "→", can_control).clicked() {
-                            let result = self.device.jog_xy(self.jog_step_mm, 0.0, jog_feed_rate);
-                            self.apply_device_action(result);
-                        }
-                        ui.end_row();
+                            if control_button(ui, "←", can_control).clicked() {
+                                let result =
+                                    self.device.jog_xy(-self.jog_step_mm, 0.0, jog_feed_rate);
+                                self.apply_device_action(result);
+                            }
+                            if control_button(ui, "🏠", can_control).clicked() {
+                                let result = self.device.home_xy();
+                                self.apply_device_action(result);
+                            }
+                            if control_button(ui, "→", can_control).clicked() {
+                                let result =
+                                    self.device.jog_xy(self.jog_step_mm, 0.0, jog_feed_rate);
+                                self.apply_device_action(result);
+                            }
+                            ui.end_row();
 
-                        spacer_button_cell(ui);
-                        if control_button(ui, "↓", can_control).clicked() {
-                            let result = self.device.jog_xy(0.0, -self.jog_step_mm, jog_feed_rate);
-                            self.apply_device_action(result);
-                        }
-                        spacer_button_cell(ui);
-                        ui.end_row();
-                    });
+                            spacer_button_cell(ui);
+                            if control_button(ui, "↓", can_control).clicked() {
+                                let result =
+                                    self.device.jog_xy(0.0, -self.jog_step_mm, jog_feed_rate);
+                                self.apply_device_action(result);
+                            }
+                            spacer_button_cell(ui);
+                            ui.end_row();
+                        });
                 },
             );
 
@@ -336,25 +343,27 @@ impl PenarticApp {
                 |ui| {
                     ui.label("Z");
                     ui.separator();
-                    egui::Grid::new("z-jog-grid").spacing(egui::vec2(4.0, 4.0)).show(ui, |ui| {
-                        if control_button(ui, "↑", can_control).clicked() {
-                            let result = self.device.jog_z(self.jog_step_mm, jog_feed_rate);
-                            self.apply_device_action(result);
-                        }
-                        ui.end_row();
+                    egui::Grid::new("z-jog-grid")
+                        .spacing(egui::vec2(CONTROL_GRID_SPACING, CONTROL_GRID_SPACING))
+                        .show(ui, |ui| {
+                            if control_button(ui, "↑", can_control).clicked() {
+                                let result = self.device.jog_z(self.jog_step_mm, jog_feed_rate);
+                                self.apply_device_action(result);
+                            }
+                            ui.end_row();
 
-                        if control_button(ui, "🏠", can_control).clicked() {
-                            let result = self.device.home_z();
-                            self.apply_device_action(result);
-                        }
-                        ui.end_row();
+                            if control_button(ui, "🏠", can_control).clicked() {
+                                let result = self.device.home_z();
+                                self.apply_device_action(result);
+                            }
+                            ui.end_row();
 
-                        if control_button(ui, "↓", can_control).clicked() {
-                            let result = self.device.jog_z(-self.jog_step_mm, jog_feed_rate);
-                            self.apply_device_action(result);
-                        }
-                        ui.end_row();
-                    });
+                            if control_button(ui, "↓", can_control).clicked() {
+                                let result = self.device.jog_z(-self.jog_step_mm, jog_feed_rate);
+                                self.apply_device_action(result);
+                            }
+                            ui.end_row();
+                        });
                 },
             );
         });
@@ -385,13 +394,13 @@ impl PenarticApp {
                 ui.label("SVG를 G-code로 변환하고, 오프라인/장치 연결 모드를 모두 지원합니다.");
                 ui.separator();
 
-                if full_width_button(ui, "SVG 불러오기").clicked() {
+                if ui.button("SVG 불러오기").clicked() {
                     self.pick_svg();
                 }
                 ui.small("파일 선택이나 드래그 드롭으로 SVG를 불러올 수 있습니다.");
 
                 if let Some(plan) = &self.toolpath_plan {
-                    if full_width_button(ui, "G-code 복사").clicked() {
+                    if ui.button("G-code 복사").clicked() {
                         ui.ctx().copy_text(plan.gcode_text());
                     }
                 }
@@ -425,7 +434,7 @@ impl PenarticApp {
                 }
 
                 ui.add_enabled_ui(is_native, |ui| {
-                    if full_width_button(ui, "포트 새로고침").clicked() {
+                    if ui.button("포트 새로고침").clicked() {
                         self.device.refresh_ports();
                     }
 
@@ -450,27 +459,15 @@ impl PenarticApp {
                         self.device.connection_state(),
                         ConnectionState::Connecting | ConnectionState::Connected
                     );
-                    ui.horizontal(|ui| {
-                        let row_button_width =
-                            (ui.available_width() - ui.spacing().item_spacing.x) * 0.5;
-                        if ui
-                            .add_enabled(
-                                can_connect,
-                                egui::Button::new("연결")
-                                    .min_size(egui::vec2(row_button_width, 0.0)),
-                            )
-                            .clicked()
+                    ui.columns_sized([Size::remainder(1.0), Size::remainder(1.0)], |columns| {
+                        if columns[0].add_enabled(can_connect, egui::Button::new("연결")).clicked()
                         {
                             let result = self.device.connect();
                             self.apply_device_action(result);
                         }
 
-                        if ui
-                            .add_enabled(
-                                can_disconnect,
-                                egui::Button::new("연결 해제")
-                                    .min_size(egui::vec2(row_button_width, 0.0)),
-                            )
+                        if columns[1]
+                            .add_enabled(can_disconnect, egui::Button::new("연결 해제"))
                             .clicked()
                         {
                             self.device.disconnect();
@@ -481,15 +478,9 @@ impl PenarticApp {
                         && self.device.is_connected()
                         && !self.device.is_job_active();
                     let can_stop_print = self.device.can_stop_print();
-                    ui.horizontal(|ui| {
-                        let row_button_width =
-                            (ui.available_width() - ui.spacing().item_spacing.x) * 0.5;
-                        if ui
-                            .add_enabled(
-                                can_start_print,
-                                egui::Button::new("프린트 시작")
-                                    .min_size(egui::vec2(row_button_width, 0.0)),
-                            )
+                    ui.columns_sized([Size::remainder(1.0), Size::remainder(1.0)], |columns| {
+                        if columns[0]
+                            .add_enabled(can_start_print, egui::Button::new("프린트 시작"))
                             .clicked()
                         {
                             if let Some(plan) = self.toolpath_plan.as_ref() {
@@ -499,12 +490,8 @@ impl PenarticApp {
                             }
                         }
 
-                        if ui
-                            .add_enabled(
-                                can_stop_print,
-                                egui::Button::new("프린트 정지")
-                                    .min_size(egui::vec2(row_button_width, 0.0)),
-                            )
+                        if columns[1]
+                            .add_enabled(can_stop_print, egui::Button::new("프린트 정지"))
                             .clicked()
                         {
                             let result = self.device.stop_job();
@@ -818,8 +805,4 @@ fn format_jog_step(step: f32) -> &'static str {
 fn printable_area_changed(current: PrintableArea, next: PrintableArea) -> bool {
     (current.width_mm - next.width_mm).abs() > 0.01
         || (current.height_mm - next.height_mm).abs() > 0.01
-}
-
-fn full_width_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.add_sized([ui.available_width(), 0.0], egui::Button::new(label))
 }
