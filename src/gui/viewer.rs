@@ -9,7 +9,7 @@ use eframe::{
 use glam::{Mat4, Vec2, Vec3, vec3};
 
 use crate::{
-    plot::model::{MotionKind, MotionSegment, ToolpathPlan},
+    plot::model::{MotionKind, MotionSegment, PrintableArea, ToolpathPlan},
     res::colors,
 };
 
@@ -238,13 +238,16 @@ impl PreviewGeometry {
         let mut line_vertices = Vec::new();
 
         append_bed(&mut triangle_vertices, &mut line_vertices, plan, view_projection);
+        if plan.is_out_of_bounds {
+            append_out_of_bounds_outline(&mut line_vertices, plan, view_projection);
+        }
 
         let (finished, partial, pen_position) = plan.progress_state(progress);
         for segment in plan.segments.iter().take(finished) {
-            append_segment(&mut line_vertices, segment, view_projection);
+            append_segment(&mut line_vertices, segment, plan.printable_area, view_projection);
         }
         if let Some(partial) = partial {
-            append_segment(&mut line_vertices, &partial, view_projection);
+            append_segment(&mut line_vertices, &partial, plan.printable_area, view_projection);
         }
 
         append_pen(&mut triangle_vertices, pen_position, view_projection);
@@ -436,13 +439,52 @@ fn append_bed(
 fn append_segment(
     line_vertices: &mut Vec<GpuVertex>,
     segment: &MotionSegment,
+    printable_area: PrintableArea,
     view_projection: Mat4,
 ) {
-    let color = match segment.kind {
-        MotionKind::Travel => colors::preview_travel(),
-        MotionKind::Draw => colors::preview_draw(),
+    let color = if segment_out_of_bounds(segment, printable_area) {
+        colors::preview_overflow()
+    } else {
+        match segment.kind {
+            MotionKind::Travel => colors::preview_travel(),
+            MotionKind::Draw => colors::preview_draw(),
+        }
     };
     append_line(line_vertices, segment.start, segment.end, color, view_projection);
+}
+
+fn append_out_of_bounds_outline(
+    line_vertices: &mut Vec<GpuVertex>,
+    plan: &ToolpathPlan,
+    view_projection: Mat4,
+) {
+    let z = 0.15;
+    let min = vec3(plan.drawing_origin.x, plan.drawing_origin.y, z);
+    let max = vec3(
+        plan.drawing_origin.x + plan.drawing_bounds.x,
+        plan.drawing_origin.y + plan.drawing_bounds.y,
+        z,
+    );
+    let color = colors::preview_overflow();
+
+    if plan.drawing_bounds.x <= 1e-3 && plan.drawing_bounds.y <= 1e-3 {
+        return;
+    }
+    if plan.drawing_bounds.x <= 1e-3 {
+        append_line(line_vertices, min, vec3(min.x, max.y, z), color, view_projection);
+        return;
+    }
+    if plan.drawing_bounds.y <= 1e-3 {
+        append_line(line_vertices, min, vec3(max.x, min.y, z), color, view_projection);
+        return;
+    }
+
+    let bottom_right = vec3(max.x, min.y, z);
+    let top_left = vec3(min.x, max.y, z);
+    append_line(line_vertices, min, bottom_right, color, view_projection);
+    append_line(line_vertices, bottom_right, max, color, view_projection);
+    append_line(line_vertices, max, top_left, color, view_projection);
+    append_line(line_vertices, top_left, min, color, view_projection);
 }
 
 fn append_pen(triangle_vertices: &mut Vec<GpuVertex>, tip: Vec3, view_projection: Mat4) {
@@ -514,6 +556,18 @@ fn append_triangle(
     vertices.push(GpuVertex { position: a, color });
     vertices.push(GpuVertex { position: b, color });
     vertices.push(GpuVertex { position: c, color });
+}
+
+fn segment_out_of_bounds(segment: &MotionSegment, printable_area: PrintableArea) -> bool {
+    point_out_of_bounds(segment.start, printable_area)
+        || point_out_of_bounds(segment.end, printable_area)
+}
+
+fn point_out_of_bounds(point: Vec3, printable_area: PrintableArea) -> bool {
+    point.x < -0.01
+        || point.y < -0.01
+        || point.x > printable_area.width_mm + 0.01
+        || point.y > printable_area.height_mm + 0.01
 }
 
 fn project_point(point: Vec3, view_projection: Mat4) -> Option<[f32; 2]> {

@@ -19,6 +19,34 @@ impl Default for PrintableArea {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SvgPlacement {
+    pub center_mm: Vec2,
+    pub scale_mm_per_unit: f32,
+}
+
+impl SvgPlacement {
+    pub fn new(center_mm: Vec2, scale_mm_per_unit: f32) -> Self {
+        let mut placement = Self { center_mm, scale_mm_per_unit };
+        placement.sanitize();
+        placement
+    }
+
+    pub fn sanitize(&mut self) {
+        if !self.center_mm.is_finite() {
+            self.center_mm = Vec2::ZERO;
+        }
+        if !self.scale_mm_per_unit.is_finite() {
+            self.scale_mm_per_unit = 1.0;
+        }
+        self.scale_mm_per_unit = self.scale_mm_per_unit.max(1e-4);
+    }
+
+    pub fn drawing_origin(&self, drawing_bounds: Vec2) -> Vec2 {
+        self.center_mm - drawing_bounds * 0.5
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSettings {
     pub printable_area: PrintableArea,
@@ -86,7 +114,9 @@ pub struct ToolpathStats {
 pub struct ToolpathPlan {
     pub source_name: String,
     pub printable_area: PrintableArea,
+    pub drawing_origin: Vec2,
     pub drawing_bounds: Vec2,
+    pub is_out_of_bounds: bool,
     pub segments: Vec<MotionSegment>,
     pub segment_end_times_s: Vec<f32>,
     pub gcode_lines: Vec<String>,
@@ -170,7 +200,9 @@ mod tests {
         let plan = ToolpathPlan {
             source_name: "timing.svg".to_owned(),
             printable_area: PrintableArea::new(220.0, 220.0),
+            drawing_origin: vec2(0.0, 0.0),
             drawing_bounds: vec2(110.0, 0.0),
+            is_out_of_bounds: false,
             segments: vec![
                 MotionSegment {
                     start: vec3(0.0, 0.0, 0.0),

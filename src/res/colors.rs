@@ -40,6 +40,10 @@ pub fn preview_draw() -> [f32; 4] {
     [0.24, 0.72, 1.0, 1.0]
 }
 
+pub fn preview_overflow() -> [f32; 4] {
+    [0.96, 0.72, 0.25, 1.0]
+}
+
 pub fn preview_pen_base() -> [f32; 4] {
     [0.96, 0.42, 0.28, 1.0]
 }

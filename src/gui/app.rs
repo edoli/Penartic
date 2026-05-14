@@ -10,7 +10,7 @@ use crate::{
     platform::device::{ConnectionState, DeviceController, PrintState},
     plot::{
         gcode,
-        model::{PrintableArea, ToolSettings, ToolpathPlan},
+        model::{PrintableArea, SvgPlacement, ToolSettings, ToolpathPlan},
     },
     res::colors,
     svg::toolpath,
@@ -34,6 +34,7 @@ pub struct PenarticApp {
     preview_renderer: PreviewRenderer,
     viewport_state: ViewportState,
     loaded_svg: Option<LoadedSvg>,
+    svg_placement: Option<SvgPlacementState>,
     toolpath_plan: Option<ToolpathPlan>,
     preview_progress: f32,
     preview_playing: bool,
@@ -47,8 +48,13 @@ pub struct PenarticApp {
 
 #[derive(Clone)]
 struct LoadedSvg {
-    file_name: String,
-    bytes: Vec<u8>,
+    document: toolpath::ParsedSvg,
+}
+
+#[derive(Clone, Copy)]
+struct SvgPlacementState {
+    placement: SvgPlacement,
+    native_scale_mm_per_unit: f32,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -62,6 +68,23 @@ struct PickedWebSvg {
 pub struct StartupSvg {
     pub file_name: String,
     pub bytes: Vec<u8>,
+}
+
+impl SvgPlacementState {
+    fn for_svg(svg: &LoadedSvg, printable_area: PrintableArea) -> Self {
+        let placement = svg.document.centered_native_placement(printable_area);
+        Self { native_scale_mm_per_unit: placement.scale_mm_per_unit, placement }
+    }
+
+    fn scale_percent(&self) -> f32 {
+        (self.placement.scale_mm_per_unit / self.native_scale_mm_per_unit.max(1e-4) * 100.0)
+            .max(1.0)
+    }
+
+    fn set_scale_percent(&mut self, scale_percent: f32) {
+        self.placement.scale_mm_per_unit =
+            (self.native_scale_mm_per_unit.max(1e-4) * (scale_percent.max(1.0) / 100.0)).max(1e-4);
+    }
 }
 
 impl PenarticApp {
@@ -81,8 +104,8 @@ impl PenarticApp {
             device,
             preview_renderer: PreviewRenderer::new(cc, preview_msaa_samples),
             viewport_state: ViewportState::default(),
-            loaded_svg: startup_svg
-                .map(|svg| LoadedSvg { file_name: svg.file_name, bytes: svg.bytes }),
+            loaded_svg: None,
+            svg_placement: None,
             toolpath_plan: None,
             preview_progress: 0.0,
             preview_playing: false,
@@ -94,8 +117,8 @@ impl PenarticApp {
             pending_svg_pick: None,
         };
 
-        if app.loaded_svg.is_some() {
-            app.rebuild_toolpath();
+        if let Some(svg) = startup_svg {
+            app.load_svg(svg.file_name, svg.bytes);
         }
 
         app
@@ -134,8 +157,25 @@ impl PenarticApp {
     }
 
     fn load_svg(&mut self, file_name: String, bytes: Vec<u8>) {
-        self.loaded_svg = Some(LoadedSvg { file_name, bytes });
-        self.rebuild_toolpath();
+        self.settings.sanitize();
+
+        match toolpath::parse_svg(file_name, &bytes) {
+            Ok(document) => {
+                let loaded_svg = LoadedSvg { document };
+                self.svg_placement =
+                    Some(SvgPlacementState::for_svg(&loaded_svg, self.settings.printable_area));
+                self.loaded_svg = Some(loaded_svg);
+                self.rebuild_toolpath();
+            }
+            Err(error) => {
+                self.loaded_svg = None;
+                self.svg_placement = None;
+                self.toolpath_plan = None;
+                self.preview_progress = 0.0;
+                self.preview_playing = false;
+                self.error_message = Some(error.to_string());
+            }
+        }
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -190,24 +230,32 @@ impl PenarticApp {
     fn rebuild_toolpath(&mut self) {
         self.settings.sanitize();
 
+        if self.svg_placement.is_none() {
+            if let Some(svg) = self.loaded_svg.as_ref() {
+                self.svg_placement =
+                    Some(SvgPlacementState::for_svg(svg, self.settings.printable_area));
+            }
+        }
+
         let Some(svg) = self.loaded_svg.as_ref() else {
             self.toolpath_plan = None;
             return;
         };
+        let Some(svg_placement) = self.svg_placement.as_mut() else {
+            self.toolpath_plan = None;
+            return;
+        };
+        svg_placement.placement.sanitize();
 
-        match toolpath::prepare_svg(svg.file_name.clone(), &svg.bytes, self.settings.printable_area)
-        {
-            Ok(prepared) => {
-                self.toolpath_plan = Some(gcode::build_plan(prepared, &self.settings));
-                self.preview_progress = 1.0;
-                self.preview_playing = false;
-                self.error_message = None;
-            }
-            Err(error) => {
-                self.toolpath_plan = None;
-                self.error_message = Some(error.to_string());
-            }
-        }
+        let prepared = toolpath::prepare_svg(
+            &svg.document,
+            svg_placement.placement,
+            self.settings.printable_area,
+        );
+        self.toolpath_plan = Some(gcode::build_plan(prepared, &self.settings));
+        self.preview_progress = 1.0;
+        self.preview_playing = false;
+        self.error_message = None;
     }
 
     fn handle_device_updates(&mut self) {
@@ -535,7 +583,64 @@ impl PenarticApp {
                     0.1..=25.0,
                 );
 
-                if settings_changed {
+                ui.separator();
+                ui.heading("SVG 배치");
+
+                let current_svg_size = self.toolpath_plan.as_ref().map(|plan| plan.drawing_bounds);
+                let svg_is_out_of_bounds =
+                    self.toolpath_plan.as_ref().is_some_and(|plan| plan.is_out_of_bounds);
+                let mut placement_changed = false;
+
+                if let Some(svg_placement) = self.svg_placement.as_mut() {
+                    let mut center_x = svg_placement.placement.center_mm.x;
+                    let mut center_y = svg_placement.placement.center_mm.y;
+                    let mut scale_percent = svg_placement.scale_percent();
+
+                    let center_x_changed = drag_value_row(
+                        ui,
+                        "SVG 중심 X (mm)",
+                        &mut center_x,
+                        1.0,
+                        -5_000.0..=5_000.0,
+                    );
+                    let center_y_changed = drag_value_row(
+                        ui,
+                        "SVG 중심 Y (mm)",
+                        &mut center_y,
+                        1.0,
+                        -5_000.0..=5_000.0,
+                    );
+                    let scale_changed =
+                        drag_value_row(ui, "SVG 크기 (%)", &mut scale_percent, 1.0, 1.0..=1_000.0);
+
+                    if center_x_changed {
+                        svg_placement.placement.center_mm.x = center_x;
+                        placement_changed = true;
+                    }
+                    if center_y_changed {
+                        svg_placement.placement.center_mm.y = center_y;
+                        placement_changed = true;
+                    }
+                    if scale_changed {
+                        svg_placement.set_scale_percent(scale_percent);
+                        placement_changed = true;
+                    }
+
+                    if let Some(size) = current_svg_size {
+                        ui.small(format!("현재 크기: {:.1} x {:.1} mm", size.x, size.y));
+                    }
+                    ui.small("100%는 SVG 좌표 1단위를 1mm로 본 초기 크기입니다.");
+                    if svg_is_out_of_bounds {
+                        ui.colored_label(
+                            colors::warning(),
+                            "SVG가 현재 프린트 가능 영역을 벗어났습니다.",
+                        );
+                    }
+                } else {
+                    ui.small("SVG를 불러오면 위치와 크기를 조절할 수 있습니다.");
+                }
+
+                if settings_changed || placement_changed {
                     self.rebuild_toolpath();
                 }
 

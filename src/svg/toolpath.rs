@@ -2,17 +2,35 @@ use glam::{Vec2, vec2};
 use thiserror::Error;
 use usvg::{Node, Options, Tree, tiny_skia_path::PathSegment};
 
-use crate::plot::model::PrintableArea;
+use crate::plot::model::{PrintableArea, SvgPlacement};
 
 const COLLINEAR_SIMPLIFY_DISTANCE_MM: f32 = 0.05;
 const COLLINEAR_SIMPLIFY_DOT_THRESHOLD: f32 = 0.9995;
+const OUT_OF_BOUNDS_TOLERANCE_MM: f32 = 0.01;
 
 #[derive(Debug, Clone)]
 pub struct PreparedSvg {
     pub source_name: String,
     pub polylines: Vec<Vec<Vec2>>,
     pub warnings: Vec<String>,
+    pub drawing_origin: Vec2,
     pub drawing_bounds: Vec2,
+    pub is_out_of_bounds: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedSvg {
+    pub source_name: String,
+    raw_polylines: Vec<Vec<Vec2>>,
+    pub warnings: Vec<String>,
+    bounds: SourceBounds,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SourceBounds {
+    min: Vec2,
+    max: Vec2,
+    size: Vec2,
 }
 
 #[derive(Debug, Error)]
@@ -29,11 +47,23 @@ struct WarningFlags {
     saw_image: bool,
 }
 
-pub fn prepare_svg(
+impl ParsedSvg {
+    pub fn centered_native_placement(&self, printable_area: PrintableArea) -> SvgPlacement {
+        let scale_mm_per_unit = 1.0;
+        let center_mm = vec2(printable_area.width_mm * 0.5, printable_area.height_mm * 0.5);
+        SvgPlacement::new(center_mm, scale_mm_per_unit)
+    }
+
+    pub fn drawing_size_for(&self, placement: SvgPlacement) -> Vec2 {
+        self.bounds.size * placement.scale_mm_per_unit
+    }
+}
+
+pub fn parse_svg(
     source_name: impl Into<String>,
     bytes: &[u8],
-    printable_area: PrintableArea,
-) -> Result<PreparedSvg, SvgToolpathError> {
+) -> Result<ParsedSvg, SvgToolpathError> {
+    let source_name = source_name.into();
     let tree = Tree::from_data(bytes, &Options::default())?;
     let mut raw_polylines = Vec::new();
     let mut warning_flags = WarningFlags::default();
@@ -47,35 +77,6 @@ pub fn prepare_svg(
 
     let (min, max) = bounds(&raw_polylines);
     let source_size = max - min;
-    let safe_width = source_size.x.max(1e-3);
-    let safe_height = source_size.y.max(1e-3);
-    let scale = if source_size.x <= 1e-3 {
-        printable_area.height_mm / safe_height
-    } else if source_size.y <= 1e-3 {
-        printable_area.width_mm / safe_width
-    } else {
-        (printable_area.width_mm / safe_width).min(printable_area.height_mm / safe_height)
-    };
-
-    let drawing_bounds = vec2(source_size.x * scale, source_size.y * scale);
-    let offset = vec2(
-        (printable_area.width_mm - drawing_bounds.x) * 0.5,
-        (printable_area.height_mm - drawing_bounds.y) * 0.5,
-    );
-
-    let polylines = raw_polylines
-        .into_iter()
-        .map(|polyline| {
-            let scaled = polyline
-                .into_iter()
-                .map(|point| {
-                    vec2((point.x - min.x) * scale + offset.x, (max.y - point.y) * scale + offset.y)
-                })
-                .collect::<Vec<_>>();
-            simplify_polyline(&scaled)
-        })
-        .collect::<Vec<_>>();
-
     let mut warnings = Vec::new();
     if tree.has_text_nodes() || warning_flags.saw_text {
         warnings
@@ -87,7 +88,52 @@ pub fn prepare_svg(
         );
     }
 
-    Ok(PreparedSvg { source_name: source_name.into(), polylines, warnings, drawing_bounds })
+    Ok(ParsedSvg {
+        source_name,
+        raw_polylines,
+        warnings,
+        bounds: SourceBounds { min, max, size: source_size },
+    })
+}
+
+pub fn prepare_svg(
+    parsed: &ParsedSvg,
+    placement: SvgPlacement,
+    printable_area: PrintableArea,
+) -> PreparedSvg {
+    let mut placement = placement;
+    placement.sanitize();
+
+    let drawing_bounds = parsed.drawing_size_for(placement);
+    let drawing_origin = placement.drawing_origin(drawing_bounds);
+    let polylines = parsed
+        .raw_polylines
+        .iter()
+        .map(|polyline| {
+            let scaled = polyline
+                .iter()
+                .copied()
+                .map(|point| {
+                    vec2(
+                        (point.x - parsed.bounds.min.x) * placement.scale_mm_per_unit
+                            + drawing_origin.x,
+                        (parsed.bounds.max.y - point.y) * placement.scale_mm_per_unit
+                            + drawing_origin.y,
+                    )
+                })
+                .collect::<Vec<_>>();
+            simplify_polyline(&scaled)
+        })
+        .collect::<Vec<_>>();
+
+    PreparedSvg {
+        source_name: parsed.source_name.clone(),
+        polylines,
+        warnings: parsed.warnings.clone(),
+        drawing_origin,
+        drawing_bounds,
+        is_out_of_bounds: drawing_out_of_bounds(drawing_origin, drawing_bounds, printable_area),
+    }
 }
 
 fn collect_group(group: &usvg::Group, polylines: &mut Vec<Vec<Vec2>>, flags: &mut WarningFlags) {
@@ -188,6 +234,13 @@ fn bounds(polylines: &[Vec<Vec2>]) -> (Vec2, Vec2) {
     }
 
     (min, max)
+}
+
+fn drawing_out_of_bounds(origin: Vec2, size: Vec2, printable_area: PrintableArea) -> bool {
+    origin.x < -OUT_OF_BOUNDS_TOLERANCE_MM
+        || origin.y < -OUT_OF_BOUNDS_TOLERANCE_MM
+        || origin.x + size.x > printable_area.width_mm + OUT_OF_BOUNDS_TOLERANCE_MM
+        || origin.y + size.y > printable_area.height_mm + OUT_OF_BOUNDS_TOLERANCE_MM
 }
 
 fn map_point(transform: usvg::Transform, point: usvg::tiny_skia_path::Point) -> Vec2 {
@@ -317,23 +370,28 @@ mod tests {
     use std::{fs, path::Path};
 
     #[test]
-    fn prepares_simple_svg_into_centered_points() {
+    fn prepares_simple_svg_with_native_mm_size() {
         let svg = br#"
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
                 <path d="M 0 0 L 10 10" />
             </svg>
         "#;
 
-        let prepared = prepare_svg("line.svg", svg, PrintableArea::new(100.0, 60.0)).unwrap();
+        let parsed = parse_svg("line.svg", svg).unwrap();
+        let printable_area = PrintableArea::new(100.0, 60.0);
+        let prepared =
+            prepare_svg(&parsed, parsed.centered_native_placement(printable_area), printable_area);
 
         assert_eq!(prepared.polylines.len(), 1);
         let polyline = &prepared.polylines[0];
-        assert!(polyline[0].x >= 0.0 && polyline[0].x <= 100.0);
-        assert!(polyline[0].y >= 0.0 && polyline[0].y <= 60.0);
-        assert!(polyline[1].x >= 0.0 && polyline[1].x <= 100.0);
-        assert!(polyline[1].y >= 0.0 && polyline[1].y <= 60.0);
-        assert!(prepared.drawing_bounds.x <= 100.0 + f32::EPSILON);
-        assert!(prepared.drawing_bounds.y <= 60.0 + f32::EPSILON);
+        assert!((prepared.drawing_bounds.x - 10.0).abs() <= f32::EPSILON);
+        assert!((prepared.drawing_bounds.y - 10.0).abs() <= f32::EPSILON);
+        assert!((prepared.drawing_origin.x - 45.0).abs() <= f32::EPSILON);
+        assert!((prepared.drawing_origin.y - 25.0).abs() <= f32::EPSILON);
+        assert!((polyline[0].x - 45.0).abs() <= f32::EPSILON);
+        assert!((polyline[0].y - 35.0).abs() <= f32::EPSILON);
+        assert!((polyline[1].x - 55.0).abs() <= f32::EPSILON);
+        assert!((polyline[1].y - 25.0).abs() <= f32::EPSILON);
     }
 
     #[test]
@@ -344,9 +402,45 @@ mod tests {
             </svg>
         "#;
 
-        let prepared = prepare_svg("line.svg", svg, PrintableArea::new(100.0, 60.0)).unwrap();
+        let parsed = parse_svg("line.svg", svg).unwrap();
+        let printable_area = PrintableArea::new(100.0, 60.0);
+        let prepared =
+            prepare_svg(&parsed, parsed.centered_native_placement(printable_area), printable_area);
         assert_eq!(prepared.polylines.len(), 1);
         assert_eq!(prepared.polylines[0].len(), 2);
+    }
+
+    #[test]
+    fn keeps_svg_size_and_position_when_printable_area_changes() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10">
+                <path d="M 0 0 L 20 10" />
+            </svg>
+        "#;
+
+        let parsed = parse_svg("line.svg", svg).unwrap();
+        let placement = parsed.centered_native_placement(PrintableArea::new(100.0, 60.0));
+        let small = prepare_svg(&parsed, placement, PrintableArea::new(100.0, 60.0));
+        let large = prepare_svg(&parsed, placement, PrintableArea::new(240.0, 180.0));
+
+        assert_eq!(small.drawing_origin, large.drawing_origin);
+        assert_eq!(small.drawing_bounds, large.drawing_bounds);
+        assert!(!large.is_out_of_bounds);
+    }
+
+    #[test]
+    fn marks_svg_as_out_of_bounds_when_it_exits_printable_area() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+                <path d="M 0 0 L 10 10" />
+            </svg>
+        "#;
+
+        let parsed = parse_svg("line.svg", svg).unwrap();
+        let placement = SvgPlacement::new(vec2(80.0, 50.0), 10.0);
+        let prepared = prepare_svg(&parsed, placement, PrintableArea::new(100.0, 100.0));
+
+        assert!(prepared.is_out_of_bounds);
     }
 
     #[test]
@@ -373,7 +467,7 @@ mod tests {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string());
 
-            prepare_svg(file_name, &bytes, PrintableArea::default()).unwrap_or_else(|error| {
+            parse_svg(file_name, &bytes).unwrap_or_else(|error| {
                 panic!("failed to load sample SVG {}: {error}", path.display())
             });
 

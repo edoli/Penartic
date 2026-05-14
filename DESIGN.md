@@ -19,16 +19,17 @@ The product must remain useful even when no device is connected:
 1. Start the app without a device.
 2. Set printable width, printable height, draw speed, and Z lift height from the left sidebar.
 3. Load an SVG file through the file picker, drag-and-drop, or a native startup path used for validation.
-4. Convert the SVG into a sampled toolpath and G-code.
-5. Show the completed result immediately in the 3D preview, then scrub backward or replay it with the timeline slider using real motion time.
-6. Copy the generated G-code if needed.
+4. Start from the SVG's raw coordinate size interpreted as millimeters, centered once on load, then adjust SVG position and size from the left sidebar when needed.
+5. Convert the SVG into a sampled toolpath and G-code without automatically rescaling the existing SVG placement when printable area settings later change.
+6. Show the completed result immediately in the 3D preview, then scrub backward or replay it with the timeline slider using real motion time.
+7. Copy the generated G-code if needed.
 
 ### 2.2 Connected workflow
 
 1. Refresh and select a serial port.
 2. Connect to the device.
 3. Probe firmware information (`M115`) and configuration (`M503`) on a best-effort basis.
-4. If build volume information is detected, update the printable area and rebuild the toolpath.
+4. If build volume information is detected, update the printable area and rebuild the toolpath without rewriting the current SVG placement or scale.
 5. Use the built-in jog/home controls for XY and Z when manual positioning is needed.
 6. Queue the generated G-code to the device, stop it if needed, and keep invalid actions disabled while the current state is active.
 
@@ -43,10 +44,10 @@ The product must remain useful even when no device is connected:
 
 | Module | Responsibility |
 | --- | --- |
-| `src/gui/app.rs` | Main egui application state, sidebar UI, SVG loading, playback controls, and layout wiring |
+| `src/gui/app.rs` | Main egui application state, sidebar UI, SVG loading, SVG placement controls, playback controls, and layout wiring |
 | `src/gui/viewer.rs` | Custom WGPU paint callback for the bed, pen mesh, and timeline-aware motion preview |
 | `src/gui/fonts.rs` | Native fallback CJK font discovery and deferred font loading |
-| `src/svg/toolpath.rs` | Parse SVG with `usvg`, flatten path segments into polylines, normalize into printable space |
+| `src/svg/toolpath.rs` | Parse SVG with `usvg`, flatten path segments into polylines, compute intrinsic bounds, and apply persistent placement transforms |
 | `src/plot/gcode.rs` | Convert sampled polylines into travel/draw motion segments and G-code |
 | `src/plot/model.rs` | Shared settings, motion, and toolpath data structures |
 | `src/platform/device.rs` | Native serial probing and streaming, plus native/web capability split |
@@ -72,6 +73,7 @@ window. The callback draws:
 - completed draw/travel segments
 - the current pen mesh at the playback position
 - motion progress using elapsed toolpath time rather than raw segment count
+- out-of-bounds SVG segments plus the placed SVG bounds when the drawing exceeds the printable area
 - left drag rotates the camera and right drag pans the view across the bed plane
 - preview vertex buffers may grow when printable area or toolpath density changes and therefore must be resized safely before queue writes
 
@@ -97,6 +99,7 @@ updated with the same value to avoid WGPU validation errors.
 - native connection probing sends `M115`, `M503`, and `M211`; Marlin `M211` `Min:`/`Max:` reports are used to detect printable width and height when `M503` does not include build volume
 - if device probing fails, the manually configured printable area remains authoritative
 - detected printable area changes are applied only when the reported size actually changes, to avoid redundant rebuild churn
+- printable area changes rebuild the preview/toolpath but do not overwrite a user-adjusted SVG placement or size
 - printing state is tracked explicitly so start/stop/connect/disconnect controls can be enabled only when valid
 - the UI keeps polling the native serial worker while a device is connected or connecting, so asynchronous probe responses can update settings after the initial click frame
 - direct jog/home controls send synchronized metric movement commands for XY and Z when no print job is active
@@ -107,10 +110,12 @@ updated with the same value to avoid WGPU validation errors.
 1. Parse SVG with `usvg`.
 2. Walk visible path nodes.
 3. Convert path segments into polyline samples.
-4. Compute drawing bounds.
-5. Fit and center the drawing into the configured printable area.
-6. Build motion segments with explicit travel lifts.
-7. Emit G-code and preview data from the same toolpath plan.
+4. Compute intrinsic SVG bounds.
+5. On load, create a one-time centered default placement that interprets SVG coordinate units as millimeters instead of auto-fitting to the printable area.
+6. Reuse the user-controlled SVG placement for later rebuilds instead of auto-rescaling when printable area changes.
+7. Mark drawings that extend beyond the printable area so the UI and preview can warn/highlight them.
+8. Build motion segments with explicit travel lifts.
+9. Emit G-code and preview data from the same toolpath plan.
 
 Current non-goals:
 

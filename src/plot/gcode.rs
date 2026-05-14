@@ -134,7 +134,9 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
     ToolpathPlan {
         source_name: prepared.source_name,
         printable_area: settings.printable_area,
+        drawing_origin: prepared.drawing_origin,
         drawing_bounds: prepared.drawing_bounds,
+        is_out_of_bounds: prepared.is_out_of_bounds,
         segments,
         segment_end_times_s,
         gcode_lines,
@@ -223,7 +225,9 @@ mod tests {
             source_name: "shape.svg".to_owned(),
             polylines: vec![vec![vec2(10.0, 10.0), vec2(40.0, 10.0)]],
             warnings: Vec::new(),
+            drawing_origin: vec2(10.0, 10.0),
             drawing_bounds: vec2(30.0, 0.0),
+            is_out_of_bounds: false,
         };
 
         let plan = build_plan(
@@ -254,7 +258,9 @@ mod tests {
             source_name: "shape.svg".to_owned(),
             polylines: vec![vec![vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(20.0, 0.0)]],
             warnings: Vec::new(),
+            drawing_origin: vec2(0.0, 0.0),
             drawing_bounds: vec2(20.0, 0.0),
+            is_out_of_bounds: false,
         };
 
         let plan = build_plan(prepared, &ToolSettings::default());
