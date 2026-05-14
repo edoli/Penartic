@@ -52,7 +52,7 @@ fn default_corner_smoothing_enabled() -> bool {
 }
 
 fn default_corner_smoothing_radius_mm() -> f32 {
-    0.75
+    0.3
 }
 
 fn default_corner_smoothing_angle_deg() -> f32 {
