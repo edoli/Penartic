@@ -43,6 +43,7 @@ pub struct PenarticApp {
     toolpath_plan: Option<ToolpathPlan>,
     preview_progress: f32,
     preview_playing: bool,
+    show_travel_moves: bool,
     jog_step_mm: f32,
     error_message: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -116,6 +117,7 @@ impl PenarticApp {
             toolpath_plan: None,
             preview_progress: 0.0,
             preview_playing: false,
+            show_travel_moves: true,
             jog_step_mm: 1.0,
             error_message: startup_error,
             #[cfg(not(target_arch = "wasm32"))]
@@ -836,6 +838,7 @@ impl PenarticApp {
                     preview_size,
                     self.toolpath_plan.as_ref(),
                     self.preview_progress,
+                    self.show_travel_moves,
                     &mut self.viewport_state,
                 );
                 self.show_preview_controls_overlay(ui, preview_rect, &timeline_text);
@@ -898,6 +901,8 @@ impl PenarticApp {
                         self.preview_progress = 0.0;
                         self.preview_playing = false;
                     }
+
+                    ui.checkbox(&mut self.show_travel_moves, "펜 리프트 이동 경로 표시");
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(timeline_text);

@@ -183,6 +183,7 @@ impl PreviewRenderer {
         desired_size: egui::Vec2,
         plan: Option<&ToolpathPlan>,
         progress: f32,
+        show_travel_moves: bool,
         state: &mut ViewportState,
     ) -> egui::Rect {
         let desired = egui::vec2(desired_size.x.max(1.0), desired_size.y.max(1.0));
@@ -217,7 +218,7 @@ impl PreviewRenderer {
         };
 
         let view_projection = view_projection_for(plan, rect.size(), state);
-        let geometry = self.cached_geometry(plan, progress);
+        let geometry = self.cached_geometry(plan, progress, show_travel_moves);
 
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
@@ -230,7 +231,12 @@ impl PreviewRenderer {
         rect
     }
 
-    fn cached_geometry(&self, plan: &ToolpathPlan, progress: f32) -> Arc<PreviewGeometry> {
+    fn cached_geometry(
+        &self,
+        plan: &ToolpathPlan,
+        progress: f32,
+        show_travel_moves: bool,
+    ) -> Arc<PreviewGeometry> {
         let key = PreviewGeometryKey {
             plan_ptr: plan as *const ToolpathPlan as usize,
             segments_ptr: plan.segments.as_ptr() as usize,
@@ -243,6 +249,7 @@ impl PreviewRenderer {
             printable_height: plan.printable_area.height_mm.to_bits(),
             is_out_of_bounds: plan.is_out_of_bounds,
             progress_bits: progress.to_bits(),
+            show_travel_moves,
         };
 
         let mut cache = self.cache.borrow_mut();
@@ -252,7 +259,7 @@ impl PreviewRenderer {
             }
         }
 
-        let geometry = Arc::new(PreviewGeometry::from_plan(plan, progress));
+        let geometry = Arc::new(PreviewGeometry::from_plan(plan, progress, show_travel_moves));
         *cache = Some(PreviewGeometryCache { key, geometry: geometry.clone() });
         geometry
     }
@@ -277,6 +284,7 @@ struct PreviewGeometryKey {
     printable_height: u32,
     is_out_of_bounds: bool,
     progress_bits: u32,
+    show_travel_moves: bool,
 }
 
 struct PreviewGeometryCache {
@@ -285,7 +293,7 @@ struct PreviewGeometryCache {
 }
 
 impl PreviewGeometry {
-    fn from_plan(plan: &ToolpathPlan, progress: f32) -> Self {
+    fn from_plan(plan: &ToolpathPlan, progress: f32, show_travel_moves: bool) -> Self {
         let mut triangle_vertices = Vec::new();
         let mut line_vertices = Vec::new();
 
@@ -296,10 +304,10 @@ impl PreviewGeometry {
 
         let (finished, partial, pen_position) = plan.progress_state(progress);
         for segment in plan.segments.iter().take(finished) {
-            append_segment(&mut line_vertices, segment, plan.printable_area);
+            append_segment(&mut line_vertices, segment, plan.printable_area, show_travel_moves);
         }
         if let Some(partial) = partial {
-            append_segment(&mut line_vertices, &partial, plan.printable_area);
+            append_segment(&mut line_vertices, &partial, plan.printable_area, show_travel_moves);
         }
 
         append_pen(&mut triangle_vertices, pen_position);
@@ -576,7 +584,12 @@ fn append_segment(
     line_vertices: &mut Vec<GpuVertex>,
     segment: &MotionSegment,
     printable_area: PrintableArea,
+    show_travel_moves: bool,
 ) {
+    if segment.kind == MotionKind::Travel && !show_travel_moves {
+        return;
+    }
+
     let color = if segment_out_of_bounds(segment, printable_area) {
         colors::preview_overflow()
     } else {
