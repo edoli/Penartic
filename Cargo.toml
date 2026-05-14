@@ -1,0 +1,28 @@
+[package]
+name = "penartic"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+
+[lib]
+name = "penartic_app"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bytemuck = { version = "1.24.0", features = ["derive"] }
+eframe = { version = "0.33.3", features = ["wgpu"] }
+glam = "0.32.1"
+log = "0.4.28"
+poll-promise = { version = "0.3.0", features = ["web"] }
+rfd = "0.17.2"
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"
+usvg = "0.47.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+serialport = "4.9.0"
+
+[target.wasm32-unknown-unknown.dependencies]
+console_error_panic_hook = "0.1.7"
+wasm-bindgen = "0.2.121"
+wasm-bindgen-futures = "0.4.71"
