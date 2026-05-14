@@ -4,7 +4,7 @@ use crate::plot::model::PrintableArea;
 
 const DEVICE_LOG_LIMIT: usize = 48;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-const MAX_IN_FLIGHT_LINES: usize = 8;
+const MAX_IN_FLIGHT_LINES: usize = 128;
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,7 +274,14 @@ impl DeviceController {
             .ok_or_else(|| "이동할 축이 없습니다.".to_owned())?;
         self.queue_manual_commands(
             "수동 X/Y 이동 명령을 전송했습니다.",
-            vec!["G91".to_owned(), command, "G90".to_owned()],
+            vec![
+                "G21".to_owned(),
+                "M400".to_owned(),
+                "G91".to_owned(),
+                command,
+                "M400".to_owned(),
+                "G90".to_owned(),
+            ],
         )
     }
 
@@ -283,16 +290,29 @@ impl DeviceController {
             .ok_or_else(|| "이동할 축이 없습니다.".to_owned())?;
         self.queue_manual_commands(
             "수동 Z 이동 명령을 전송했습니다.",
-            vec!["G91".to_owned(), command, "G90".to_owned()],
+            vec![
+                "G21".to_owned(),
+                "M400".to_owned(),
+                "G91".to_owned(),
+                command,
+                "M400".to_owned(),
+                "G90".to_owned(),
+            ],
         )
     }
 
     pub fn home_xy(&mut self) -> Result<(), String> {
-        self.queue_manual_commands("XY 홈 이동 명령을 전송했습니다.", vec!["G28 X Y".to_owned()])
+        self.queue_manual_commands(
+            "XY 홈 이동 명령을 전송했습니다.",
+            vec!["G21".to_owned(), "M400".to_owned(), "G28 X Y".to_owned()],
+        )
     }
 
     pub fn home_z(&mut self) -> Result<(), String> {
-        self.queue_manual_commands("Z 홈 이동 명령을 전송했습니다.", vec!["G28 Z".to_owned()])
+        self.queue_manual_commands(
+            "Z 홈 이동 명령을 전송했습니다.",
+            vec!["G21".to_owned(), "M400".to_owned(), "G28 Z".to_owned()],
+        )
     }
 
     pub fn tick(&mut self) -> Option<PrintableArea> {
@@ -513,17 +533,33 @@ fn run_worker(
             }
 
             while in_flight_sources.len() < MAX_IN_FLIGHT_LINES {
-                let Some(queued) = queued_lines.pop_front() else {
-                    break;
-                };
+                let mut batch = Vec::new();
 
-                write_line(&mut *port, &queued.line).map_err(|error| error.to_string())?;
-                if queued.source == QueuedLineSource::Job {
-                    queued_job_count = queued_job_count.saturating_sub(1);
-                    in_flight_job_count += 1;
+                while in_flight_sources.len() < MAX_IN_FLIGHT_LINES {
+                    let Some(queued) = queued_lines.pop_front() else {
+                        break;
+                    };
+
+                    batch.extend_from_slice(queued.line.as_bytes());
+                    batch.push(b'\n');
+
+                    if queued.source == QueuedLineSource::Job {
+                        queued_job_count = queued_job_count.saturating_sub(1);
+                        in_flight_job_count += 1;
+                    }
+                    in_flight_sources.push_back(queued.source);
+                    oldest_in_flight_since.get_or_insert_with(Instant::now);
+
+                    if batch.len() >= 2048 {
+                        break;
+                    }
                 }
-                in_flight_sources.push_back(queued.source);
-                oldest_in_flight_since.get_or_insert_with(Instant::now);
+
+                if batch.is_empty() {
+                    break;
+                }
+
+                port.write_all(&batch).map_err(|error| error.to_string())?;
             }
 
             match port.read(&mut read_buffer) {
@@ -602,13 +638,6 @@ fn run_worker(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn write_line(port: &mut dyn serialport::SerialPort, line: &str) -> std::io::Result<()> {
-    port.write_all(line.as_bytes())?;
-    port.write_all(b"\n")?;
-    port.flush()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn parse_firmware(line: &str) -> Option<String> {
     let upper = line.to_ascii_uppercase();
     if upper.contains("FIRMWARE_NAME") || upper.contains("MACHINE_TYPE") {
@@ -662,7 +691,7 @@ fn build_relative_move_command(
     delta_z_mm: f32,
     feed_rate_mm_min: f32,
 ) -> Option<String> {
-    let mut command = "G0".to_owned();
+    let mut command = "G1".to_owned();
 
     if delta_x_mm.abs() > f32::EPSILON {
         command.push_str(&format!(" X{delta_x_mm:.3}"));
@@ -731,6 +760,6 @@ mod tests {
     #[test]
     fn builds_relative_xy_move_command() {
         let command = build_relative_move_command(10.0, -2.5, 0.0, 1800.0).unwrap();
-        assert_eq!(command, "G0 X10.000 Y-2.500 F1800");
+        assert_eq!(command, "G1 X10.000 Y-2.500 F1800");
     }
 }

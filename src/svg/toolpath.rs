@@ -4,6 +4,9 @@ use usvg::{Node, Options, Tree, tiny_skia_path::PathSegment};
 
 use crate::plot::model::PrintableArea;
 
+const COLLINEAR_SIMPLIFY_DISTANCE_MM: f32 = 0.05;
+const COLLINEAR_SIMPLIFY_DOT_THRESHOLD: f32 = 0.9995;
+
 #[derive(Debug, Clone)]
 pub struct PreparedSvg {
     pub source_name: String,
@@ -63,12 +66,13 @@ pub fn prepare_svg(
     let polylines = raw_polylines
         .into_iter()
         .map(|polyline| {
-            polyline
+            let scaled = polyline
                 .into_iter()
                 .map(|point| {
                     vec2((point.x - min.x) * scale + offset.x, (max.y - point.y) * scale + offset.y)
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            simplify_polyline(&scaled)
         })
         .collect::<Vec<_>>();
 
@@ -210,6 +214,61 @@ fn dedupe_polyline(polyline: &mut Vec<Vec2>) {
     *polyline = cleaned;
 }
 
+fn simplify_polyline(polyline: &[Vec2]) -> Vec<Vec2> {
+    if polyline.len() <= 2 {
+        return polyline.to_vec();
+    }
+
+    let mut simplified = Vec::with_capacity(polyline.len());
+    simplified.push(polyline[0]);
+
+    for point in polyline.iter().copied().skip(1) {
+        simplified.push(point);
+
+        while simplified.len() >= 3 {
+            let len = simplified.len();
+            let a = simplified[len - 3];
+            let b = simplified[len - 2];
+            let c = simplified[len - 1];
+            if is_mergeable_collinear_triplet(a, b, c) {
+                simplified.remove(len - 2);
+            } else {
+                break;
+            }
+        }
+    }
+
+    simplified
+}
+
+fn is_mergeable_collinear_triplet(a: Vec2, b: Vec2, c: Vec2) -> bool {
+    let ab = b - a;
+    let bc = c - b;
+    let ac = c - a;
+
+    if ab.length_squared() <= 1e-6 || bc.length_squared() <= 1e-6 || ac.length_squared() <= 1e-6 {
+        return true;
+    }
+
+    let ab_dir = ab.normalize();
+    let bc_dir = bc.normalize();
+    let direction_match = ab_dir.dot(bc_dir) >= COLLINEAR_SIMPLIFY_DOT_THRESHOLD;
+    let deviation_sq = point_to_segment_distance_sq(b, a, c);
+    direction_match && deviation_sq <= COLLINEAR_SIMPLIFY_DISTANCE_MM.powi(2)
+}
+
+fn point_to_segment_distance_sq(point: Vec2, start: Vec2, end: Vec2) -> f32 {
+    let segment = end - start;
+    let length_sq = segment.length_squared();
+    if length_sq <= 1e-6 {
+        return point.distance_squared(start);
+    }
+
+    let t = ((point - start).dot(segment) / length_sq).clamp(0.0, 1.0);
+    let projected = start + segment * t;
+    point.distance_squared(projected)
+}
+
 fn append_quadratic(polyline: &mut Vec<Vec2>, start: Vec2, control: Vec2, end: Vec2) {
     let control_length = start.distance(control) + control.distance(end);
     let steps = ((control_length / 12.0).ceil() as usize).clamp(6, 48);
@@ -275,6 +334,19 @@ mod tests {
         assert!(polyline[1].y >= 0.0 && polyline[1].y <= 60.0);
         assert!(prepared.drawing_bounds.x <= 100.0 + f32::EPSILON);
         assert!(prepared.drawing_bounds.y <= 60.0 + f32::EPSILON);
+    }
+
+    #[test]
+    fn simplifies_collinear_svg_points_after_scaling() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 1">
+                <path d="M 0 0 L 3 0 L 6 0 L 10 0" />
+            </svg>
+        "#;
+
+        let prepared = prepare_svg("line.svg", svg, PrintableArea::new(100.0, 60.0)).unwrap();
+        assert_eq!(prepared.polylines.len(), 1);
+        assert_eq!(prepared.polylines[0].len(), 2);
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
     let mut segments = Vec::new();
     let mut segment_end_times_s = Vec::new();
     let mut gcode_lines = Vec::new();
+    let mut active_feed_rate = None;
 
     let draw_feed = settings.print_feed_rate();
     let travel_feed = settings.travel_feed_rate();
@@ -32,7 +33,7 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
             MotionKind::Travel,
             travel_speed,
         );
-        gcode_lines.push(format!("G1 Z{lift:.3} F{travel_feed:.0}"));
+        push_g1_move(&mut gcode_lines, &mut active_feed_rate, travel_feed, None, None, Some(lift));
         current = lifted_origin;
     }
 
@@ -53,7 +54,14 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
                 MotionKind::Travel,
                 travel_speed,
             );
-            gcode_lines.push(format!("G1 X{:.3} Y{:.3} F{travel_feed:.0}", start.x, start.y));
+            push_g1_move(
+                &mut gcode_lines,
+                &mut active_feed_rate,
+                travel_feed,
+                Some(start.x),
+                Some(start.y),
+                None,
+            );
             current = start;
         }
 
@@ -67,7 +75,14 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
                 MotionKind::Travel,
                 travel_speed,
             );
-            gcode_lines.push(format!("G1 Z{:.3} F{travel_feed:.0}", lowered.z));
+            push_g1_move(
+                &mut gcode_lines,
+                &mut active_feed_rate,
+                travel_feed,
+                None,
+                None,
+                Some(lowered.z),
+            );
             current = lowered;
         }
 
@@ -85,7 +100,14 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
                 MotionKind::Draw,
                 draw_speed,
             );
-            gcode_lines.push(format!("G1 X{:.3} Y{:.3} F{draw_feed:.0}", next.x, next.y));
+            push_g1_move(
+                &mut gcode_lines,
+                &mut active_feed_rate,
+                draw_feed,
+                Some(next.x),
+                Some(next.y),
+                None,
+            );
             current = next;
         }
 
@@ -99,7 +121,14 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
                 MotionKind::Travel,
                 travel_speed,
             );
-            gcode_lines.push(format!("G1 Z{lift:.3} F{travel_feed:.0}"));
+            push_g1_move(
+                &mut gcode_lines,
+                &mut active_feed_rate,
+                travel_feed,
+                None,
+                None,
+                Some(lift),
+            );
             current = raised;
         }
     }
@@ -132,6 +161,35 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
         warnings: prepared.warnings,
         stats,
     }
+}
+
+fn push_g1_move(
+    gcode_lines: &mut Vec<String>,
+    active_feed_rate: &mut Option<i32>,
+    feed_rate_mm_min: f32,
+    x: Option<f32>,
+    y: Option<f32>,
+    z: Option<f32>,
+) {
+    let mut line = "G1".to_owned();
+
+    if let Some(x) = x {
+        line.push_str(&format!(" X{x:.2}"));
+    }
+    if let Some(y) = y {
+        line.push_str(&format!(" Y{y:.2}"));
+    }
+    if let Some(z) = z {
+        line.push_str(&format!(" Z{z:.3}"));
+    }
+
+    let rounded_feed_rate = feed_rate_mm_min.round() as i32;
+    if active_feed_rate.is_none_or(|active| active != rounded_feed_rate) {
+        line.push_str(&format!(" F{rounded_feed_rate}"));
+        *active_feed_rate = Some(rounded_feed_rate);
+    }
+
+    gcode_lines.push(line);
 }
 
 fn push_segment(
@@ -178,5 +236,26 @@ mod tests {
         assert_eq!(plan.gcode_lines[3], "G90");
         assert!(plan.gcode_lines[4].starts_with("G1 Z2.000"));
         assert_eq!(plan.gcode_lines[5], "G28 X Y");
+    }
+
+    #[test]
+    fn omits_redundant_feed_rate_from_consecutive_draw_moves() {
+        let prepared = PreparedSvg {
+            source_name: "shape.svg".to_owned(),
+            polylines: vec![vec![vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(20.0, 0.0)]],
+            warnings: Vec::new(),
+            drawing_bounds: vec2(20.0, 0.0),
+        };
+
+        let plan = build_plan(prepared, &ToolSettings::default());
+        let draw_lines = plan
+            .gcode_lines
+            .iter()
+            .filter(|line| line.starts_with("G1 X"))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert!(draw_lines.iter().any(|line| line.contains(" F")));
+        assert!(draw_lines.iter().any(|line| !line.contains(" F")));
     }
 }

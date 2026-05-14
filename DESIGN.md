@@ -57,7 +57,7 @@ The product must remain useful even when no device is connected:
 
 ### 4.1 UI layout
 
-- left sidebar: device controls, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
+- left sidebar: fixed-width device controls, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
 - central panel: preview title, 3D preview canvas, and a bottom control band reserved for playback buttons plus a full-width timeline slider
 
 ### 4.2 3D preview
@@ -70,6 +70,7 @@ window. The callback draws:
 - the current pen mesh at the playback position
 - motion progress using elapsed toolpath time rather than raw segment count
 - left drag rotates the camera and right drag pans the view across the bed plane
+- preview vertex buffers may grow when printable area or toolpath density changes and therefore must be resized safely before queue writes
 
 ### 4.3 WGPU/MSAA rule
 
@@ -91,9 +92,10 @@ updated with the same value to avoid WGPU validation errors.
 - the device controller keeps the app usable when no port is available
 - firmware/build-volume probing is intentionally best-effort because printer responses vary by firmware
 - if device probing fails, the manually configured printable area remains authoritative
+- detected printable area changes are applied only when the reported size actually changes, to avoid redundant rebuild churn
 - printing state is tracked explicitly so start/stop/connect/disconnect controls can be enabled only when valid
-- direct jog/home controls send relative-motion commands for XY and Z when no print job is active
-- the serial worker keeps multiple G-code lines in flight so typical planner-based firmware can move more smoothly than a strict one-line-at-a-time stream
+- direct jog/home controls send synchronized metric movement commands for XY and Z when no print job is active
+- the serial worker keeps many G-code lines in flight, batches writes, and does not flush the serial port after every line, so typical planner-based firmware can move more smoothly than a strict one-line-at-a-time stream
 
 ## 7. SVG conversion pipeline
 
@@ -148,3 +150,4 @@ Current non-goals:
 - sample SVG assets used for regression live under `sample\`
 - native crash logs are written to a platform-specific application log directory
 - repo-local VS Code tasks provide build, test, SVG regression, web build, and Windows screenshot validation entry points
+- the generated validation screenshot is currently written to `target\validation\ui-validation.png`

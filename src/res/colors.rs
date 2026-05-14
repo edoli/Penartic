@@ -20,10 +20,6 @@ pub fn preview_background() -> Color32 {
     Color32::from_rgb(14, 18, 24)
 }
 
-pub fn preview_border() -> Color32 {
-    Color32::from_rgb(45, 53, 66)
-}
-
 pub fn preview_plane() -> [f32; 4] {
     [0.08, 0.11, 0.16, 1.0]
 }

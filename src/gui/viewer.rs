@@ -3,7 +3,7 @@ use eframe::{
     egui,
     egui_wgpu::{
         self,
-        wgpu::{self, util::DeviceExt as _},
+        wgpu::{self},
     },
 };
 use glam::{Mat4, Vec2, Vec3, vec3};
@@ -40,9 +40,16 @@ impl ViewportState {
             let pan_scale = scene_extent.max(40.0)
                 / response.rect.width().min(response.rect.height()).max(1.0)
                 * self.zoom;
-            let right = vec3(-self.yaw.sin(), self.yaw.cos(), 0.0);
-            let forward = vec3(self.yaw.cos(), self.yaw.sin(), 0.0);
-            let pan_delta = (-right * drag.x + forward * drag.y) * pan_scale;
+            let eye_direction = vec3(
+                self.yaw.cos() * self.pitch.cos(),
+                self.yaw.sin() * self.pitch.cos(),
+                self.pitch.sin(),
+            );
+            let view_direction = -eye_direction;
+            let right = view_direction.cross(Vec3::Z).normalize_or_zero();
+            let camera_up = right.cross(view_direction);
+            let up_on_plane = vec3(camera_up.x, camera_up.y, 0.0).normalize_or_zero();
+            let pan_delta = (-right * drag.x + up_on_plane * drag.y) * pan_scale;
             self.pan += pan_delta.truncate();
         }
 
@@ -352,12 +359,15 @@ fn update_buffer(
 
     if buffer.is_none() || bytes.len() > *capacity {
         *capacity = bytes.len().next_power_of_two();
-        *buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        *buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
-            contents: bytes,
+            size: *capacity as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: false,
         }));
-    } else if let Some(existing) = buffer.as_ref() {
+    }
+
+    if let Some(existing) = buffer.as_ref() {
         queue.write_buffer(existing, 0, bytes);
     }
 }
