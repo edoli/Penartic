@@ -1,14 +1,21 @@
-#![cfg(not(target_arch = "wasm32"))]
-
+#[cfg(not(target_arch = "wasm32"))]
 use std::{env, error::Error, path::PathBuf, time::Duration};
 
+#[cfg(not(target_arch = "wasm32"))]
 use penartic_app::{NativeScreenshotValidationConfig, run_native_screenshot_validation};
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), Box<dyn Error>> {
     let config = parse_args()?;
     run_native_screenshot_validation(config)
 }
 
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    panic!("ui_screenshot_validation is only available on native targets");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_args() -> Result<NativeScreenshotValidationConfig, Box<dyn Error>> {
     let mut config = NativeScreenshotValidationConfig::default();
     let mut args = env::args_os().skip(1);
@@ -40,6 +47,7 @@ fn parse_args() -> Result<NativeScreenshotValidationConfig, Box<dyn Error>> {
     Ok(config)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn next_path(
     args: &mut impl Iterator<Item = std::ffi::OsString>,
     name: &str,
@@ -47,6 +55,7 @@ fn next_path(
     args.next().map(PathBuf::from).ok_or_else(|| format!("missing value for {name}").into())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn next_f32(
     args: &mut impl Iterator<Item = std::ffi::OsString>,
     name: &str,
@@ -64,6 +73,7 @@ fn next_f32(
     Ok(value)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn print_help() {
     println!(
         "Usage: cargo run --bin ui_screenshot_validation -- [--svg sample/sample1.svg] [--out target/validation/ui-validation.png] [--delay-seconds 2] [--timeout-seconds 20]"
