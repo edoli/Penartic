@@ -444,8 +444,11 @@ impl PenarticApp {
                 let sidebar_width = ui.available_width();
                 ui.set_width(sidebar_width);
                 ui.set_min_width(sidebar_width);
+                let log_reserved_height = (ui.available_height() * 0.30).clamp(180.0, 360.0);
+                let controls_height = (ui.available_height() - log_reserved_height).max(120.0);
                 egui::ScrollArea::vertical()
                     .id_salt("settings-sidebar-scroll")
+                    .max_height(controls_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.set_width(sidebar_width);
@@ -786,22 +789,25 @@ impl PenarticApp {
                         if let Some(error) = self.device.last_error() {
                             ui.colored_label(colors::error(), error);
                         }
-
-                        ui.separator();
-                        ui.heading("장치 로그");
-                        let log_width = ui.available_width();
-                        egui::ScrollArea::vertical().max_height(180.0).auto_shrink([false, false]).show(
-                            ui,
-                            |ui| {
-                                ui.set_min_width(log_width);
-                                for line in self.device.log_lines().rev() {
-                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                                        ui.add_sized([log_width, 0.0], egui::Label::new(line).wrap());
-                                    });
-                                }
-                            },
-                        );
                     });
+                ui.separator();
+                self.show_device_log(ui);
+            });
+    }
+
+    fn show_device_log(&self, ui: &mut egui::Ui) {
+        ui.heading("장치 로그");
+        let log_width = ui.available_width();
+        egui::ScrollArea::vertical()
+            .max_height(ui.available_height())
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_width(log_width);
+                for line in self.device.log_lines().rev() {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                        ui.add(egui::Label::new(line).wrap().halign(egui::Align::Min));
+                    });
+                }
             });
     }
 
