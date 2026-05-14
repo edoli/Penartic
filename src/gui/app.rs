@@ -468,13 +468,12 @@ impl PenarticApp {
                 });
 
                 if let Some(firmware) = self.device.firmware_summary() {
-                    ui.horizontal(|ui| {
-                        ui.label("펌웨어");
-                        let response = ui.add_sized(
+                    ui.horizontal_top(|ui| {
+                        ui.add_sized([56.0, 0.0], egui::Label::new("펌웨어"));
+                        ui.add_sized(
                             [ui.available_width().max(0.0), 0.0],
                             egui::Label::new(firmware).truncate(),
                         );
-                        response.on_hover_text(firmware);
                     });
                 }
 
