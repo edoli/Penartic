@@ -8,7 +8,7 @@ use crate::{
         ToolpathStats,
     },
     svg::{
-        ir::{CubicBezierSegment, LineSegment, SvgIrSegment, SvgIrStroke},
+        ir::{CubicBezierSegment, SvgIrSegment, SvgIrStroke},
         toolpath::PreparedSvg,
     },
 };
@@ -18,6 +18,10 @@ const MIN_ARC_PREVIEW_SUBDIVISIONS: usize = 4;
 const MAX_ARC_PREVIEW_SUBDIVISIONS: usize = 96;
 const CORNER_EPSILON: f32 = 1e-4;
 const MAX_SMOOTHABLE_CORNER_TURN_DEG: f32 = 170.0;
+const ARC_RADIUS_TOLERANCE_MM: f32 = 0.05;
+const ARC_RADIUS_TOLERANCE_RATIO: f32 = 0.005;
+const ARC_DETECTION_TANGENT_MIN_DOT: f32 = 0.98;
+const MIN_DETECTABLE_ARC_SWEEP_RAD: f32 = 0.05;
 
 #[derive(Debug, Clone, Copy)]
 enum DrawPrimitive {
@@ -30,6 +34,20 @@ impl DrawPrimitive {
         match self {
             Self::Ir(segment) => segment.start_point(),
             Self::Arc(segment) => segment.start,
+        }
+    }
+
+    fn end_point(self) -> Vec2 {
+        match self {
+            Self::Ir(segment) => segment.end_point(),
+            Self::Arc(segment) => segment.end,
+        }
+    }
+
+    fn approximate_length(self) -> f32 {
+        match self {
+            Self::Ir(segment) => segment.approximate_length(),
+            Self::Arc(segment) => segment.approximate_length(),
         }
     }
 
@@ -47,8 +65,42 @@ impl DrawPrimitive {
         }
     }
 
-    fn is_arc(self) -> bool {
-        matches!(self, Self::Arc(_))
+    fn detected_arc(self) -> Option<ArcSegment> {
+        match self {
+            Self::Arc(segment) => Some(segment),
+            Self::Ir(_) => None,
+        }
+    }
+
+    fn slice_by_arc_length(
+        self,
+        start_length: f32,
+        end_length: f32,
+        total_length: f32,
+    ) -> Option<Self> {
+        match self {
+            Self::Ir(segment) => {
+                segment.slice_by_arc_length(start_length, end_length, total_length).map(Self::Ir)
+            }
+            Self::Arc(segment) => {
+                segment.slice_by_arc_length(start_length, end_length, total_length).map(Self::Arc)
+            }
+        }
+    }
+
+    fn point_and_tangent_at_arc_length(
+        self,
+        target_length: f32,
+        total_length: f32,
+    ) -> (Vec2, Vec2) {
+        match self {
+            Self::Ir(segment) => {
+                segment.point_and_tangent_at_arc_length(target_length, total_length)
+            }
+            Self::Arc(segment) => {
+                segment.point_and_tangent_at_arc_length(target_length, total_length)
+            }
+        }
     }
 }
 
@@ -66,17 +118,7 @@ impl ArcSegment {
     }
 
     fn signed_sweep_radians(self) -> f32 {
-        let start_vector = self.start - self.center;
-        let end_vector = self.end - self.center;
-        let sweep = cross_2d(start_vector, end_vector).atan2(start_vector.dot(end_vector));
-
-        if self.clockwise {
-            if sweep > 0.0 { sweep - TAU } else { sweep }
-        } else if sweep < 0.0 {
-            sweep + TAU
-        } else {
-            sweep
-        }
+        signed_sweep_between(self.start - self.center, self.end - self.center, self.clockwise)
     }
 
     fn approximate_length(self) -> f32 {
@@ -92,15 +134,12 @@ impl ArcSegment {
 
         let steps = ((self.approximate_length() / ARC_PREVIEW_SEGMENT_LENGTH_MM).ceil() as usize)
             .clamp(MIN_ARC_PREVIEW_SUBDIVISIONS, MAX_ARC_PREVIEW_SUBDIVISIONS);
-        let start_angle = (self.start.y - self.center.y).atan2(self.start.x - self.center.x);
-
         let mut points = Vec::with_capacity(steps + 1);
         points.push(self.start);
 
         for step in 1..=steps {
-            let t = step as f32 / steps as f32;
-            let angle = start_angle + sweep * t;
-            points.push(self.center + vec2(angle.cos(), angle.sin()) * radius);
+            let fraction = step as f32 / steps as f32;
+            points.push(self.point_and_tangent_at_fraction(fraction).0);
         }
 
         if let Some(last) = points.last_mut() {
@@ -108,6 +147,53 @@ impl ArcSegment {
         }
 
         points
+    }
+
+    fn point_and_tangent_at_arc_length(
+        self,
+        target_length: f32,
+        total_length: f32,
+    ) -> (Vec2, Vec2) {
+        if total_length <= CORNER_EPSILON {
+            return (self.start, expected_arc_tangent(self.clockwise, self.start, self.center));
+        }
+
+        let fraction = (target_length / total_length).clamp(0.0, 1.0);
+        self.point_and_tangent_at_fraction(fraction)
+    }
+
+    fn slice_by_arc_length(
+        self,
+        start_length: f32,
+        end_length: f32,
+        total_length: f32,
+    ) -> Option<Self> {
+        if total_length <= CORNER_EPSILON {
+            return None;
+        }
+
+        let clamped_start = start_length.clamp(0.0, total_length);
+        let clamped_end = end_length.clamp(clamped_start, total_length);
+        if clamped_end - clamped_start <= CORNER_EPSILON {
+            return None;
+        }
+
+        if clamped_start <= CORNER_EPSILON && total_length - clamped_end <= CORNER_EPSILON {
+            return Some(self);
+        }
+
+        let start = self.point_and_tangent_at_arc_length(clamped_start, total_length).0;
+        let end = self.point_and_tangent_at_arc_length(clamped_end, total_length).0;
+        Some(Self { start, end, center: self.center, clockwise: self.clockwise })
+    }
+
+    fn point_and_tangent_at_fraction(self, fraction: f32) -> (Vec2, Vec2) {
+        let radius = self.radius();
+        let sweep = self.signed_sweep_radians();
+        let start_angle = (self.start.y - self.center.y).atan2(self.start.x - self.center.x);
+        let angle = start_angle + sweep * fraction.clamp(0.0, 1.0);
+        let point = self.center + vec2(angle.cos(), angle.sin()) * radius;
+        (point, expected_arc_tangent(self.clockwise, point, self.center))
     }
 }
 
@@ -142,11 +228,13 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
     let has_arc_primitives = stroke_primitives
         .iter()
         .flat_map(|primitives| primitives.iter())
-        .any(|primitive| primitive.is_arc());
-    let has_bezier_primitives = strokes
-        .iter()
-        .flat_map(|stroke| stroke.segments.iter())
-        .any(|segment| matches!(segment, SvgIrSegment::Quadratic(_) | SvgIrSegment::Cubic(_)));
+        .any(|primitive| primitive.detected_arc().is_some());
+    let has_g5_primitives =
+        stroke_primitives.iter().flat_map(|primitives| primitives.iter()).any(|primitive| {
+            primitive.to_cubic_bezier().is_some()
+                && (!settings.curve_output_mode.prefers_g2g3()
+                    || primitive.detected_arc().is_none())
+        });
 
     gcode_lines.push("; Generated by Penartic".to_owned());
     gcode_lines.push(format!("; Source: {}", source_name));
@@ -255,7 +343,7 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
                 .to_owned(),
         );
     }
-    if settings.curve_output_mode.prefers_g5() && has_bezier_primitives {
+    if settings.curve_output_mode.prefers_g5() && has_g5_primitives {
         warnings.push(
             "G5 곡선 출력은 지원 펌웨어에서만 올바르게 동작합니다. 지원하지 않으면 선분 출력 모드를 사용하세요."
                 .to_owned(),
@@ -278,197 +366,155 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
 }
 
 fn build_draw_primitives(stroke: &SvgIrStroke, settings: &ToolSettings) -> Vec<DrawPrimitive> {
-    let mut primitives = Vec::new();
-    let mut line_run = Vec::new();
+    let base_primitives = stroke
+        .segments
+        .iter()
+        .copied()
+        .map(DrawPrimitive::Ir)
+        .filter(|primitive| primitive.approximate_length() > CORNER_EPSILON)
+        .collect::<Vec<_>>();
 
-    for segment in &stroke.segments {
-        match *segment {
-            SvgIrSegment::Line(segment) => {
-                if line_run.is_empty() {
-                    line_run.push(segment.start);
-                    line_run.push(segment.end);
-                } else if points_match(*line_run.last().unwrap(), segment.start) {
-                    line_run.push(segment.end);
-                } else {
-                    flush_line_run(&mut line_run, settings, &mut primitives);
-                    line_run.push(segment.start);
-                    line_run.push(segment.end);
-                }
-            }
-            _ => {
-                flush_line_run(&mut line_run, settings, &mut primitives);
-                primitives.push(DrawPrimitive::Ir(*segment));
-            }
-        }
-    }
-
-    flush_line_run(&mut line_run, settings, &mut primitives);
-    primitives
+    apply_corner_smoothing(base_primitives, settings)
 }
 
-fn flush_line_run(
-    line_run: &mut Vec<Vec2>,
+fn apply_corner_smoothing(
+    base_primitives: Vec<DrawPrimitive>,
     settings: &ToolSettings,
-    primitives: &mut Vec<DrawPrimitive>,
-) {
-    if line_run.len() >= 2 {
-        primitives.extend(smooth_polyline_run(line_run, settings));
-    }
-    line_run.clear();
-}
-
-fn smooth_polyline_run(points: &[Vec2], settings: &ToolSettings) -> Vec<DrawPrimitive> {
-    if points.len() < 2 {
-        return Vec::new();
-    }
-
-    let is_closed = points.len() >= 4 && points_match(points[0], *points.last().unwrap());
-    if is_closed {
-        let unique_points = &points[..points.len() - 1];
-        if unique_points.len() >= 3 {
-            return build_smoothed_closed_polyline(unique_points, settings);
-        }
-    }
-
-    build_smoothed_open_polyline(points, settings)
-}
-
-fn build_smoothed_open_polyline(points: &[Vec2], settings: &ToolSettings) -> Vec<DrawPrimitive> {
-    let mut primitives = Vec::new();
-    let trims = compute_corner_trims(points, false, settings);
-    let mut current = points[0];
-
-    for index in 1..points.len() - 1 {
-        let corner = points[index];
-        if trims[index] <= CORNER_EPSILON {
-            push_line_primitive(&mut primitives, current, corner);
-            current = corner;
-            continue;
-        }
-
-        if let Some((tangent_start, arc)) =
-            corner_transition(points[index - 1], corner, points[index + 1], trims[index])
-        {
-            push_line_primitive(&mut primitives, current, tangent_start);
-            primitives.push(DrawPrimitive::Arc(arc));
-            current = arc.end;
-        } else {
-            push_line_primitive(&mut primitives, current, corner);
-            current = corner;
-        }
-    }
-
-    push_line_primitive(&mut primitives, current, *points.last().unwrap());
-    primitives
-}
-
-fn build_smoothed_closed_polyline(points: &[Vec2], settings: &ToolSettings) -> Vec<DrawPrimitive> {
-    let mut primitives = Vec::new();
-    let trims = compute_corner_trims(points, true, settings);
-
-    let start_transition =
-        corner_transition(points[points.len() - 1], points[0], points[1], trims[0]);
-    let mut current = start_transition.map(|(_, arc)| arc.end).unwrap_or(points[0]);
-
-    for step in 1..=points.len() {
-        let index = step % points.len();
-        let previous = if index == 0 { points.len() - 1 } else { index - 1 };
-        let next = (index + 1) % points.len();
-
-        if let Some((tangent_start, arc)) =
-            corner_transition(points[previous], points[index], points[next], trims[index])
-        {
-            push_line_primitive(&mut primitives, current, tangent_start);
-            primitives.push(DrawPrimitive::Arc(arc));
-            current = arc.end;
-        } else {
-            push_line_primitive(&mut primitives, current, points[index]);
-            current = points[index];
-        }
-    }
-
-    primitives
-}
-
-fn compute_corner_trims(points: &[Vec2], closed: bool, settings: &ToolSettings) -> Vec<f32> {
-    let mut trims = vec![0.0; points.len()];
-    if !settings.corner_smoothing_enabled
+) -> Vec<DrawPrimitive> {
+    if base_primitives.len() < 2
+        || !settings.corner_smoothing_enabled
         || settings.corner_smoothing_radius_mm <= CORNER_EPSILON
-        || points.len() < 3
     {
-        return trims;
+        return base_primitives;
     }
 
-    let min_turn_radians = settings.corner_smoothing_angle_deg.to_radians();
-    let max_turn_radians = MAX_SMOOTHABLE_CORNER_TURN_DEG.to_radians();
-
-    for index in 0..points.len() {
-        if !closed && (index == 0 || index + 1 == points.len()) {
-            continue;
-        }
-
-        let previous = if index == 0 { points.len() - 1 } else { index - 1 };
-        let next = if index + 1 == points.len() { 0 } else { index + 1 };
-        let incoming = points[index] - points[previous];
-        let outgoing = points[next] - points[index];
-        let incoming_length = incoming.length();
-        let outgoing_length = outgoing.length();
-        if incoming_length <= CORNER_EPSILON || outgoing_length <= CORNER_EPSILON {
-            continue;
-        }
-
-        let incoming_direction = incoming / incoming_length;
-        let outgoing_direction = outgoing / outgoing_length;
-        let turn = incoming_direction.dot(outgoing_direction).clamp(-1.0, 1.0).acos();
-        if turn < min_turn_radians || turn > max_turn_radians {
-            continue;
-        }
-
-        if cross_2d(incoming_direction, outgoing_direction).abs() <= CORNER_EPSILON {
-            continue;
-        }
-
-        let tan_half_turn = (turn * 0.5).tan();
-        if !tan_half_turn.is_finite() || tan_half_turn <= CORNER_EPSILON {
-            continue;
-        }
-
-        trims[index] = settings.corner_smoothing_radius_mm * tan_half_turn;
+    let closed = base_primitives.len() > 1
+        && points_match(
+            base_primitives[0].start_point(),
+            base_primitives.last().unwrap().end_point(),
+        );
+    let join_count =
+        if closed { base_primitives.len() } else { base_primitives.len().saturating_sub(1) };
+    if join_count == 0 {
+        return base_primitives;
     }
 
-    limit_corner_trims(points, closed, &mut trims);
-    trims
+    let lengths =
+        base_primitives.iter().map(|primitive| primitive.approximate_length()).collect::<Vec<_>>();
+    let mut join_trims = (0..join_count)
+        .map(|index| {
+            let next_index = if index + 1 < base_primitives.len() { index + 1 } else { 0 };
+            desired_trim_for_join(base_primitives[index], base_primitives[next_index], settings)
+        })
+        .collect::<Vec<_>>();
+
+    limit_join_trims(&lengths, closed, &mut join_trims);
+
+    if join_trims.iter().all(|trim| *trim <= CORNER_EPSILON) {
+        return base_primitives;
+    }
+
+    let mut result = Vec::new();
+
+    for index in 0..base_primitives.len() {
+        let start_trim = primitive_start_trim(index, base_primitives.len(), closed, &join_trims);
+        let end_trim = primitive_end_trim(index, base_primitives.len(), closed, &join_trims);
+        let primitive_length = lengths[index];
+
+        if let Some(trimmed) = base_primitives[index].slice_by_arc_length(
+            start_trim,
+            primitive_length - end_trim,
+            primitive_length,
+        ) {
+            result.push(trimmed);
+        }
+
+        let has_next = index + 1 < base_primitives.len();
+        if has_next || closed {
+            let next_index = if has_next { index + 1 } else { 0 };
+            if let Some(transition) = build_transition_primitive(
+                base_primitives[index],
+                lengths[index],
+                base_primitives[next_index],
+                lengths[next_index],
+                join_trims[index],
+            ) {
+                result.push(transition);
+            }
+        }
+    }
+
+    result.into_iter().filter(|primitive| primitive.approximate_length() > CORNER_EPSILON).collect()
 }
 
-fn limit_corner_trims(points: &[Vec2], closed: bool, trims: &mut [f32]) {
-    if points.len() < 2 {
+fn desired_trim_for_join(
+    left: DrawPrimitive,
+    right: DrawPrimitive,
+    settings: &ToolSettings,
+) -> f32 {
+    let left_length = left.approximate_length();
+    let right_length = right.approximate_length();
+    if left_length <= CORNER_EPSILON || right_length <= CORNER_EPSILON {
+        return 0.0;
+    }
+
+    let (_, left_tangent) = left.point_and_tangent_at_arc_length(left_length, left_length);
+    let (_, right_tangent) = right.point_and_tangent_at_arc_length(0.0, right_length);
+    let turn = left_tangent.dot(right_tangent).clamp(-1.0, 1.0).acos();
+    if turn < settings.corner_smoothing_angle_deg.to_radians()
+        || turn > MAX_SMOOTHABLE_CORNER_TURN_DEG.to_radians()
+        || cross_2d(left_tangent, right_tangent).abs() <= CORNER_EPSILON
+    {
+        return 0.0;
+    }
+
+    let tan_half_turn = (turn * 0.5).tan();
+    if !tan_half_turn.is_finite() || tan_half_turn <= CORNER_EPSILON {
+        return 0.0;
+    }
+
+    settings.corner_smoothing_radius_mm * tan_half_turn
+}
+
+fn limit_join_trims(lengths: &[f32], closed: bool, join_trims: &mut [f32]) {
+    if lengths.is_empty() || join_trims.is_empty() {
         return;
     }
 
-    let segment_count = if closed { points.len() } else { points.len() - 1 };
-    for _ in 0..segment_count.saturating_mul(4).max(1) {
+    for _ in 0..lengths.len().saturating_mul(4).max(1) {
         let mut changed = false;
 
-        for segment_index in 0..segment_count {
-            let start_index = segment_index;
-            let end_index =
-                if closed { (segment_index + 1) % points.len() } else { segment_index + 1 };
-            let segment_length = points[start_index].distance(points[end_index]);
-            if segment_length <= CORNER_EPSILON {
-                trims[start_index] = 0.0;
-                trims[end_index] = 0.0;
-                continue;
-            }
+        for index in 0..lengths.len() {
+            let start_join = if closed {
+                Some((index + lengths.len() - 1) % lengths.len())
+            } else if index > 0 {
+                Some(index - 1)
+            } else {
+                None
+            };
+            let end_join = if closed {
+                Some(index)
+            } else if index + 1 < lengths.len() {
+                Some(index)
+            } else {
+                None
+            };
 
-            let available_length = (segment_length - CORNER_EPSILON).max(0.0);
-            let total_trim = trims[start_index] + trims[end_index];
+            let start_trim = start_join.map(|join| join_trims[join]).unwrap_or(0.0);
+            let end_trim = end_join.map(|join| join_trims[join]).unwrap_or(0.0);
+            let total_trim = start_trim + end_trim;
+            let available_length = (lengths[index] - CORNER_EPSILON).max(0.0);
             if total_trim <= available_length || total_trim <= CORNER_EPSILON {
                 continue;
             }
 
             let scale = available_length / total_trim;
-            trims[start_index] *= scale;
-            trims[end_index] *= scale;
+            if let Some(join) = start_join {
+                join_trims[join] *= scale;
+            }
+            if let Some(join) = end_join {
+                join_trims[join] *= scale;
+            }
             changed = true;
         }
 
@@ -478,67 +524,148 @@ fn limit_corner_trims(points: &[Vec2], closed: bool, trims: &mut [f32]) {
     }
 }
 
-fn corner_transition(
-    previous: Vec2,
-    corner: Vec2,
-    next: Vec2,
+fn primitive_start_trim(index: usize, count: usize, closed: bool, join_trims: &[f32]) -> f32 {
+    if closed {
+        join_trims[(index + count - 1) % count]
+    } else if index > 0 {
+        join_trims[index - 1]
+    } else {
+        0.0
+    }
+}
+
+fn primitive_end_trim(index: usize, count: usize, closed: bool, join_trims: &[f32]) -> f32 {
+    if closed {
+        join_trims[index]
+    } else if index + 1 < count {
+        join_trims[index]
+    } else {
+        0.0
+    }
+}
+
+fn build_transition_primitive(
+    left: DrawPrimitive,
+    left_length: f32,
+    right: DrawPrimitive,
+    right_length: f32,
     trim: f32,
-) -> Option<(Vec2, ArcSegment)> {
-    if trim <= CORNER_EPSILON {
+) -> Option<DrawPrimitive> {
+    if trim <= CORNER_EPSILON || left_length <= CORNER_EPSILON || right_length <= CORNER_EPSILON {
         return None;
     }
 
-    let incoming = corner - previous;
-    let outgoing = next - corner;
-    let incoming_length = incoming.length();
-    let outgoing_length = outgoing.length();
-    if incoming_length <= CORNER_EPSILON || outgoing_length <= CORNER_EPSILON {
+    let (start_point, start_tangent) =
+        left.point_and_tangent_at_arc_length(left_length - trim, left_length);
+    let (end_point, end_tangent) = right.point_and_tangent_at_arc_length(trim, right_length);
+    if let Some(arc) =
+        build_tangent_rounding_arc(start_point, start_tangent, end_point, end_tangent)
+    {
+        return Some(DrawPrimitive::Arc(arc));
+    }
+
+    build_tangent_cubic_transition(start_point, start_tangent, end_point, end_tangent)
+        .map(DrawPrimitive::Ir)
+}
+
+fn build_tangent_rounding_arc(
+    start_point: Vec2,
+    start_tangent: Vec2,
+    end_point: Vec2,
+    end_tangent: Vec2,
+) -> Option<ArcSegment> {
+    if points_match(start_point, end_point) {
         return None;
     }
 
-    let incoming_direction = incoming / incoming_length;
-    let outgoing_direction = outgoing / outgoing_length;
-    let turn = incoming_direction.dot(outgoing_direction).clamp(-1.0, 1.0).acos();
-    let tan_half_turn = (turn * 0.5).tan();
-    if !tan_half_turn.is_finite() || tan_half_turn <= CORNER_EPSILON {
-        return None;
-    }
-
-    let radius = trim / tan_half_turn;
-    if !radius.is_finite() || radius <= CORNER_EPSILON {
-        return None;
-    }
-
-    let start = corner - incoming_direction * trim;
-    let end = corner + outgoing_direction * trim;
-    let turn_cross = cross_2d(incoming_direction, outgoing_direction);
+    let turn_cross = cross_2d(start_tangent, end_tangent);
     if turn_cross.abs() <= CORNER_EPSILON {
         return None;
     }
 
-    let normal = if turn_cross > 0.0 {
-        left_normal(incoming_direction)
-    } else {
-        right_normal(incoming_direction)
-    };
-    let outgoing_normal = if turn_cross > 0.0 {
-        left_normal(outgoing_direction)
-    } else {
-        right_normal(outgoing_direction)
-    };
-    let center_from_incoming = start + normal * radius;
-    let center_from_outgoing = end + outgoing_normal * radius;
-    let center = (center_from_incoming + center_from_outgoing) * 0.5;
-
-    Some((start, ArcSegment { start, end, center, clockwise: turn_cross < 0.0 }))
-}
-
-fn push_line_primitive(primitives: &mut Vec<DrawPrimitive>, start: Vec2, end: Vec2) {
-    if start.distance_squared(end) <= CORNER_EPSILON * CORNER_EPSILON {
-        return;
+    let start_normal =
+        if turn_cross > 0.0 { left_normal(start_tangent) } else { right_normal(start_tangent) };
+    let end_normal =
+        if turn_cross > 0.0 { left_normal(end_tangent) } else { right_normal(end_tangent) };
+    let center = line_intersection(start_point, start_normal, end_point, end_normal)?;
+    let radius = center.distance(start_point);
+    if !radius.is_finite() || radius <= CORNER_EPSILON {
+        return None;
     }
 
-    primitives.push(DrawPrimitive::Ir(SvgIrSegment::Line(LineSegment { start, end })));
+    let tolerance = arc_radius_tolerance(radius);
+    if (center.distance(end_point) - radius).abs() > tolerance {
+        return None;
+    }
+
+    let arc =
+        ArcSegment { start: start_point, end: end_point, center, clockwise: turn_cross < 0.0 };
+    if arc.signed_sweep_radians().abs() <= MIN_DETECTABLE_ARC_SWEEP_RAD {
+        return None;
+    }
+
+    let expected_start_tangent = expected_arc_tangent(arc.clockwise, arc.start, arc.center);
+    let expected_end_tangent = expected_arc_tangent(arc.clockwise, arc.end, arc.center);
+    if start_tangent.dot(expected_start_tangent) < ARC_DETECTION_TANGENT_MIN_DOT
+        || end_tangent.dot(expected_end_tangent) < ARC_DETECTION_TANGENT_MIN_DOT
+    {
+        return None;
+    }
+
+    Some(arc)
+}
+
+fn arc_radius_tolerance(radius: f32) -> f32 {
+    ARC_RADIUS_TOLERANCE_MM.max(radius * ARC_RADIUS_TOLERANCE_RATIO)
+}
+
+fn build_tangent_cubic_transition(
+    start_point: Vec2,
+    start_tangent: Vec2,
+    end_point: Vec2,
+    end_tangent: Vec2,
+) -> Option<SvgIrSegment> {
+    let chord = end_point - start_point;
+    let chord_length = chord.length();
+    if chord_length <= CORNER_EPSILON {
+        return None;
+    }
+
+    let control_length = (chord_length / 3.0).max(CORNER_EPSILON);
+    let control_a = start_point + start_tangent * control_length;
+    let control_b = end_point - end_tangent * control_length;
+    Some(SvgIrSegment::cubic(start_point, control_a, control_b, end_point))
+}
+
+fn signed_sweep_between(start_vector: Vec2, end_vector: Vec2, clockwise: bool) -> f32 {
+    let sweep = cross_2d(start_vector, end_vector).atan2(start_vector.dot(end_vector));
+    if clockwise {
+        if sweep > 0.0 { sweep - TAU } else { sweep }
+    } else if sweep < 0.0 {
+        sweep + TAU
+    } else {
+        sweep
+    }
+}
+
+fn expected_arc_tangent(clockwise: bool, point: Vec2, center: Vec2) -> Vec2 {
+    let radius_direction = (point - center).normalize_or_zero();
+    if clockwise { right_normal(radius_direction) } else { left_normal(radius_direction) }
+}
+
+fn line_intersection(
+    point_a: Vec2,
+    direction_a: Vec2,
+    point_b: Vec2,
+    direction_b: Vec2,
+) -> Option<Vec2> {
+    let denominator = cross_2d(direction_a, direction_b);
+    if denominator.abs() <= CORNER_EPSILON {
+        return None;
+    }
+
+    let t = cross_2d(point_b - point_a, direction_b) / denominator;
+    Some(point_a + direction_a * t)
 }
 
 fn points_match(a: Vec2, b: Vec2) -> bool {
@@ -578,39 +705,22 @@ fn append_draw_primitive(
         *current = next;
     }
 
-    match primitive {
-        DrawPrimitive::Arc(segment) if curve_output_mode.prefers_g2g3() => {
-            push_g2g3_move(gcode_lines, active_feed_rate, draw_feed, segment);
+    if curve_output_mode.prefers_g2g3() {
+        if let Some(arc) = primitive.detected_arc() {
+            push_g2g3_move(gcode_lines, active_feed_rate, draw_feed, arc);
+            return;
         }
-        _ if curve_output_mode.prefers_g5() => {
-            if let Some(cubic) = primitive.to_cubic_bezier() {
-                push_g5_move(gcode_lines, active_feed_rate, draw_feed, cubic);
-                return;
-            }
+    }
 
-            for point in points.into_iter().skip(1) {
-                push_g1_move(
-                    gcode_lines,
-                    active_feed_rate,
-                    draw_feed,
-                    Some(point.x),
-                    Some(point.y),
-                    None,
-                );
-            }
+    if curve_output_mode.prefers_g5() {
+        if let Some(cubic) = primitive.to_cubic_bezier() {
+            push_g5_move(gcode_lines, active_feed_rate, draw_feed, cubic);
+            return;
         }
-        _ => {
-            for point in points.into_iter().skip(1) {
-                push_g1_move(
-                    gcode_lines,
-                    active_feed_rate,
-                    draw_feed,
-                    Some(point.x),
-                    Some(point.y),
-                    None,
-                );
-            }
-        }
+    }
+
+    for point in points.into_iter().skip(1) {
+        push_g1_move(gcode_lines, active_feed_rate, draw_feed, Some(point.x), Some(point.y), None);
     }
 }
 
@@ -789,13 +899,7 @@ mod tests {
     use glam::vec2;
 
     use super::*;
-    use crate::{
-        plot::model::{CurveOutputMode, PrintStartMode, PrintableArea, ToolSettings},
-        svg::{
-            ir::{QuadraticBezierSegment, SvgIrStroke},
-            toolpath::PreparedSvg,
-        },
-    };
+    use crate::plot::model::{CurveOutputMode, PrintStartMode, PrintableArea, ToolSettings};
 
     fn line_prepared_svg() -> PreparedSvg {
         PreparedSvg {
@@ -882,12 +986,10 @@ mod tests {
     fn emits_g5_for_curve_segments_when_enabled() {
         let prepared = PreparedSvg {
             source_name: "curve.svg".to_owned(),
-            strokes: vec![SvgIrStroke::new(vec![SvgIrSegment::Quadratic(
-                QuadraticBezierSegment {
-                    start: vec2(0.0, 0.0),
-                    control: vec2(5.0, 10.0),
-                    end: vec2(10.0, 0.0),
-                },
+            strokes: vec![SvgIrStroke::new(vec![SvgIrSegment::quadratic(
+                vec2(0.0, 0.0),
+                vec2(5.0, 10.0),
+                vec2(10.0, 0.0),
             )])],
             warnings: Vec::new(),
             drawing_origin: vec2(0.0, 0.0),
@@ -933,41 +1035,54 @@ mod tests {
     }
 
     #[test]
-    fn smooths_closed_polyline_start_corner_with_arcs() {
+    fn smooths_curve_to_line_join_based_on_endpoint_tangents() {
         let prepared = PreparedSvg {
-            source_name: "square.svg".to_owned(),
+            source_name: "curve-line.svg".to_owned(),
             strokes: vec![SvgIrStroke::new(vec![
-                SvgIrSegment::line(vec2(0.0, 0.0), vec2(10.0, 0.0)),
-                SvgIrSegment::line(vec2(10.0, 0.0), vec2(10.0, 10.0)),
-                SvgIrSegment::line(vec2(10.0, 10.0), vec2(0.0, 10.0)),
-                SvgIrSegment::line(vec2(0.0, 10.0), vec2(0.0, 0.0)),
+                SvgIrSegment::quadratic(vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(10.0, 10.0)),
+                SvgIrSegment::line(vec2(10.0, 10.0), vec2(20.0, 10.0)),
             ])],
             warnings: Vec::new(),
             drawing_origin: vec2(0.0, 0.0),
-            drawing_bounds: vec2(10.0, 10.0),
+            drawing_bounds: vec2(20.0, 10.0),
             is_out_of_bounds: false,
         };
 
-        let plan = build_plan(
-            prepared,
+        let unsmoothed = build_plan(
+            prepared.clone(),
             &ToolSettings {
                 printable_area: PrintableArea::new(100.0, 100.0),
                 print_speed_mm_s: 25.0,
                 lift_height_mm: 2.0,
                 print_start_mode: PrintStartMode::DirectFromCurrentPosition,
                 curve_output_mode: CurveOutputMode::PreferG2G3,
-                corner_smoothing_enabled: true,
+                corner_smoothing_enabled: false,
                 corner_smoothing_radius_mm: 1.0,
                 corner_smoothing_angle_deg: 45.0,
             },
         );
+        let smoothing_settings = ToolSettings {
+            printable_area: PrintableArea::new(100.0, 100.0),
+            print_speed_mm_s: 25.0,
+            lift_height_mm: 2.0,
+            print_start_mode: PrintStartMode::DirectFromCurrentPosition,
+            curve_output_mode: CurveOutputMode::PreferG2G3,
+            corner_smoothing_enabled: true,
+            corner_smoothing_radius_mm: 1.0,
+            corner_smoothing_angle_deg: 45.0,
+        };
+        let smoothed_primitives = build_draw_primitives(&prepared.strokes[0], &smoothing_settings);
 
-        let arc_count = plan
-            .gcode_lines
-            .iter()
-            .filter(|line| line.starts_with("G2 ") || line.starts_with("G3 "))
-            .count();
-        assert_eq!(arc_count, 4);
+        assert!(
+            !unsmoothed
+                .gcode_lines
+                .iter()
+                .any(|line| line.starts_with("G2 ") || line.starts_with("G3 "))
+        );
+        assert_eq!(smoothed_primitives.len(), 3);
+        assert!(!points_match(smoothed_primitives[0].end_point(), vec2(10.0, 10.0)));
+        assert!(!points_match(smoothed_primitives[1].start_point(), vec2(10.0, 10.0)));
+        assert!(!points_match(smoothed_primitives[1].end_point(), vec2(10.0, 10.0)));
     }
 
     #[test]

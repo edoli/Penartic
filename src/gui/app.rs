@@ -441,346 +441,360 @@ impl PenarticApp {
                 let sidebar_width = ui.available_width();
                 ui.set_width(sidebar_width);
                 ui.set_min_width(sidebar_width);
+                egui::ScrollArea::vertical()
+                    .id_salt("settings-sidebar-scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_width(sidebar_width);
+                        ui.set_min_width(sidebar_width);
 
-                if ui.button("SVG 불러오기").clicked() {
-                    self.pick_svg();
-                }
-                ui.small("파일 선택이나 드래그 드롭으로 SVG를 불러올 수 있습니다.");
+                        if ui.button("SVG 불러오기").clicked() {
+                            self.pick_svg();
+                        }
+                        ui.small("파일 선택이나 드래그 드롭으로 SVG를 불러올 수 있습니다.");
 
-                if let Some(plan) = &self.toolpath_plan {
-                    if ui.button("G-code 복사").clicked() {
-                        ui.ctx().copy_text(plan.gcode_text());
-                    }
-                }
-
-                ui.separator();
-                ui.heading("디바이스");
-
-                let is_native = self.device.connection_state() != ConnectionState::Unsupported;
-                let status_color = connection_status_color(&self.device);
-                ui.horizontal(|ui| {
-                    ui.label("상태");
-                    ui.colored_label(status_color, format!("● {}", self.device.status_text()));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("작업");
-                    ui.colored_label(
-                        print_state_color(self.device.print_state()),
-                        self.device.print_state_text(),
-                    );
-                });
-
-                if let Some(firmware) = self.device.firmware_summary() {
-                    ui.horizontal_top(|ui| {
-                        ui.add_sized([56.0, 0.0], egui::Label::new("펌웨어"));
-                        ui.add_sized(
-                            [ui.available_width().max(0.0), 0.0],
-                            egui::Label::new(firmware).truncate(),
-                        );
-                    });
-                }
-
-                if let Some(area) = self.device.detected_area() {
-                    ui.label(format!(
-                        "감지된 사이즈: {:.0} x {:.0} mm",
-                        area.width_mm, area.height_mm
-                    ));
-                }
-
-                let mut print_start_mode_changed = false;
-                ui.add_enabled_ui(is_native, |ui| {
-                    if ui.button("포트 새로고침").clicked() {
-                        self.device.refresh_ports();
-                    }
-
-                    let ports = self.device.ports().to_vec();
-                    let combo_width = ui.available_width();
-                    egui::ComboBox::from_id_salt("serial-port-combo")
-                        .width(combo_width)
-                        .selected_text(self.device.selected_port().unwrap_or("포트를 선택하세요"))
-                        .show_ui(ui, |ui| {
-                            for port in ports {
-                                let selected = self.device.selected_port() == Some(port.as_str());
-                                if ui.selectable_label(selected, &port).clicked() {
-                                    self.device.set_selected_port(Some(port.clone()));
-                                }
+                        if let Some(plan) = &self.toolpath_plan {
+                            if ui.button("G-code 복사").clicked() {
+                                ui.ctx().copy_text(plan.gcode_text());
                             }
+                        }
+
+                        ui.separator();
+                        ui.heading("디바이스");
+
+                        let is_native = self.device.connection_state() != ConnectionState::Unsupported;
+                        let status_color = connection_status_color(&self.device);
+                        ui.horizontal(|ui| {
+                            ui.label("상태");
+                            ui.colored_label(status_color, format!("● {}", self.device.status_text()));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("작업");
+                            ui.colored_label(
+                                print_state_color(self.device.print_state()),
+                                self.device.print_state_text(),
+                            );
                         });
 
-                    let can_connect =
-                        matches!(self.device.connection_state(), ConnectionState::Disconnected)
-                            && !self.device.ports().is_empty();
-                    let can_disconnect = matches!(
-                        self.device.connection_state(),
-                        ConnectionState::Connecting | ConnectionState::Connected
-                    );
-                    ui.columns_sized([Size::remainder(1.0), Size::remainder(1.0)], |columns| {
-                        if columns[0].add_enabled(can_connect, egui::Button::new("연결")).clicked()
-                        {
-                            let result = self.device.connect();
-                            self.apply_device_action(result);
-                        }
-
-                        if columns[1]
-                            .add_enabled(can_disconnect, egui::Button::new("연결 해제"))
-                            .clicked()
-                        {
-                            self.device.disconnect();
-                        }
-                    });
-
-                    let can_start_print = self.toolpath_plan.is_some()
-                        && self.device.is_connected()
-                        && !self.device.is_job_active();
-                    let can_stop_print = self.device.can_stop_print();
-                    let first_draw_point =
-                        self.toolpath_plan.as_ref().and_then(|plan| plan.first_draw_point);
-                    ui.columns_sized([Size::remainder(1.0), Size::remainder(1.0)], |columns| {
-                        if columns[0]
-                            .add_enabled(can_start_print, egui::Button::new("프린트 시작"))
-                            .clicked()
-                        {
-                            if let Some(plan) = self.toolpath_plan.as_ref() {
-                                let gcode_lines = plan.gcode_lines.clone();
-                                let result = self.device.send_job(&gcode_lines);
-                                self.apply_device_action(result);
-                            }
-                        }
-
-                        if columns[1]
-                            .add_enabled(can_stop_print, egui::Button::new("프린트 정지"))
-                            .clicked()
-                        {
-                            let result = self.device.stop_job();
-                            self.apply_device_action(result);
-                        }
-                    });
-
-                    let mut start_with_home =
-                        self.settings.print_start_mode == PrintStartMode::HomeBeforePrint;
-                    if ui.checkbox(&mut start_with_home, "프린트 시작 전에 XY Home 이동").changed() {
-                        self.settings.print_start_mode = if start_with_home {
-                            PrintStartMode::HomeBeforePrint
-                        } else {
-                            PrintStartMode::DirectFromCurrentPosition
-                        };
-                        print_start_mode_changed = true;
-                    }
-                    if !start_with_home {
-                        ui.small("끄면 현재 헤드가 첫 시작점과 그리기 높이에 맞춰진 상태에서 바로 그리기 시작합니다.");
-                    }
-
-                    let can_move_to_first_draw_point = first_draw_point.is_some()
-                        && self.device.is_connected()
-                        && !self.device.is_job_active();
-                    if ui
-                        .add_enabled(
-                            can_move_to_first_draw_point,
-                            egui::Button::new("첫 시작점으로 이동"),
-                        )
-                        .clicked()
-                    {
-                        if let Some(first_draw_point) = first_draw_point {
-                            let result = self.device.home_xy_and_move_to(
-                                first_draw_point.x,
-                                first_draw_point.y,
-                                self.settings.travel_feed_rate(),
-                            );
-                            self.apply_device_action(result);
-                        }
-                    }
-                    ui.small("Home 후 첫 번째 그리기 시작 위치로 이동합니다.");
-                });
-
-                self.show_manual_controls(ui);
-
-                ui.separator();
-                ui.heading("설정");
-
-                let mut settings_changed = false;
-                settings_changed |= drag_value_row(
-                    ui,
-                    "프린트 가능 너비 (mm)",
-                    &mut self.settings.printable_area.width_mm,
-                    1.0,
-                    10.0..=1_000.0,
-                );
-                settings_changed |= drag_value_row(
-                    ui,
-                    "프린트 가능 높이 (mm)",
-                    &mut self.settings.printable_area.height_mm,
-                    1.0,
-                    10.0..=1_000.0,
-                );
-                settings_changed |= drag_value_row(
-                    ui,
-                    "프린트 속도 (mm/s)",
-                    &mut self.settings.print_speed_mm_s,
-                    1.0,
-                    1.0..=500.0,
-                );
-                settings_changed |= drag_value_row(
-                    ui,
-                    "Z 리프트 (mm)",
-                    &mut self.settings.lift_height_mm,
-                    0.1,
-                    0.1..=25.0,
-                );
-                let mut prefer_g2g3 = self.settings.curve_output_mode.prefers_g2g3();
-                let mut prefer_g5 = self.settings.curve_output_mode.prefers_g5();
-                let prefer_g2g3_changed =
-                    ui.checkbox(&mut prefer_g2g3, "원호 G-code 사용 (G2/G3)").changed();
-                let prefer_g5_changed =
-                    ui.checkbox(&mut prefer_g5, "Bezier G-code 사용 (G5)").changed();
-                if prefer_g2g3_changed || prefer_g5_changed {
-                    self.settings.curve_output_mode =
-                        CurveOutputMode::from_flags(prefer_g2g3, prefer_g5);
-                    settings_changed = true;
-                }
-                if prefer_g2g3 && prefer_g5 {
-                    ui.small("코너에서 만든 짧은 원호는 G2/G3로, 베지어 곡선은 G5로 내보냅니다.");
-                } else if prefer_g2g3 {
-                    ui.small("코너 둥글림 등 원호 구간을 G2/G3로 내보냅니다.");
-                } else if prefer_g5 {
-                    ui.small("지원 펌웨어에서는 곡선을 G5로 내보내고, 미리보기는 동일한 IR에서 계산합니다.");
-                }
-
-                if ui
-                    .checkbox(
-                        &mut self.settings.corner_smoothing_enabled,
-                        "급한 코너를 미세하게 둥글게 처리",
-                    )
-                    .changed()
-                {
-                    settings_changed = true;
-                }
-                if self.settings.corner_smoothing_enabled {
-                    settings_changed |= drag_value_row(
-                        ui,
-                        "코너 둥글림 반경 (mm)",
-                        &mut self.settings.corner_smoothing_radius_mm,
-                        0.05,
-                        0.1..=10.0,
-                    );
-                    settings_changed |= drag_value_row(
-                        ui,
-                        "코너 둥글림 시작 각도 (°)",
-                        &mut self.settings.corner_smoothing_angle_deg,
-                        1.0,
-                        5.0..=170.0,
-                    );
-                    ui.small("이 각도 이상의 방향 전환에서만 짧은 원호를 넣어 꺾임을 완화합니다.");
-                }
-
-                ui.separator();
-                ui.heading("SVG 배치");
-
-                let current_svg_size = self.toolpath_plan.as_ref().map(|plan| plan.drawing_bounds);
-                let svg_is_out_of_bounds =
-                    self.toolpath_plan.as_ref().is_some_and(|plan| plan.is_out_of_bounds);
-                let mut placement_changed = false;
-
-                if let Some(svg_placement) = self.svg_placement.as_mut() {
-                    let mut center_x = svg_placement.placement.center_mm.x;
-                    let mut center_y = svg_placement.placement.center_mm.y;
-                    let mut scale_percent = svg_placement.scale_percent();
-
-                    let center_x_changed = drag_value_row(
-                        ui,
-                        "SVG 중심 X (mm)",
-                        &mut center_x,
-                        1.0,
-                        -5_000.0..=5_000.0,
-                    );
-                    let center_y_changed = drag_value_row(
-                        ui,
-                        "SVG 중심 Y (mm)",
-                        &mut center_y,
-                        1.0,
-                        -5_000.0..=5_000.0,
-                    );
-                    let scale_changed =
-                        drag_value_row(ui, "SVG 크기 (%)", &mut scale_percent, 1.0, 1.0..=1_000.0);
-
-                    if center_x_changed {
-                        svg_placement.placement.center_mm.x = center_x;
-                        placement_changed = true;
-                    }
-                    if center_y_changed {
-                        svg_placement.placement.center_mm.y = center_y;
-                        placement_changed = true;
-                    }
-                    if scale_changed {
-                        svg_placement.set_scale_percent(scale_percent);
-                        placement_changed = true;
-                    }
-
-                    if let Some(size) = current_svg_size {
-                        ui.small(format!("현재 크기: {:.1} x {:.1} mm", size.x, size.y));
-                    }
-                    ui.small("100%는 SVG 좌표 1단위를 1mm로 본 초기 크기입니다.");
-                    if svg_is_out_of_bounds {
-                        ui.colored_label(
-                            colors::warning(),
-                            "SVG가 현재 프린트 가능 영역을 벗어났습니다.",
-                        );
-                    }
-                } else {
-                    ui.small("SVG를 불러오면 위치와 크기를 조절할 수 있습니다.");
-                }
-
-                if settings_changed || placement_changed || print_start_mode_changed {
-                    self.rebuild_toolpath();
-                }
-
-                ui.separator();
-                ui.heading("잡 정보");
-
-                if let Some(plan) = &self.toolpath_plan {
-                    ui.label(format!("SVG: {}", plan.source_name));
-                    ui.label(format!(
-                        "그려지는 범위: {:.1} x {:.1} mm",
-                        plan.drawing_bounds.x, plan.drawing_bounds.y
-                    ));
-                    ui.label(format!("스트로크 수: {}", plan.stats.stroke_count));
-                    ui.label(format!("세그먼트 수: {}", plan.stats.segment_count));
-                    ui.label(format!("드로잉 거리: {:.1} mm", plan.stats.drawing_distance_mm));
-                    ui.label(format!("이동 거리: {:.1} mm", plan.stats.travel_distance_mm));
-                    ui.label(format!("예상 소요 시간: {:.1} s", plan.stats.estimated_duration_s));
-
-                    if !plan.warnings.is_empty() {
-                        ui.separator();
-                        for warning in &plan.warnings {
-                            ui.colored_label(colors::warning(), warning);
-                        }
-                    }
-                } else {
-                    ui.label("아직 변환된 SVG가 없습니다.");
-                }
-
-                if let Some(error) = &self.error_message {
-                    ui.separator();
-                    ui.colored_label(colors::error(), error);
-                }
-
-                if let Some(error) = self.device.last_error() {
-                    ui.colored_label(colors::error(), error);
-                }
-
-                ui.separator();
-                ui.heading("장치 로그");
-                let log_width = ui.available_width();
-                egui::ScrollArea::vertical().max_height(180.0).auto_shrink([false, false]).show(
-                    ui,
-                    |ui| {
-                        ui.set_min_width(log_width);
-                        for line in self.device.log_lines().rev() {
-                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                                ui.add_sized([log_width, 0.0], egui::Label::new(line).wrap());
+                        if let Some(firmware) = self.device.firmware_summary() {
+                            ui.horizontal_top(|ui| {
+                                ui.add_sized([56.0, 0.0], egui::Label::new("펌웨어"));
+                                ui.add_sized(
+                                    [ui.available_width().max(0.0), 0.0],
+                                    egui::Label::new(firmware).truncate(),
+                                );
                             });
                         }
-                    },
-                );
+
+                        if let Some(area) = self.device.detected_area() {
+                            ui.label(format!(
+                                "감지된 사이즈: {:.0} x {:.0} mm",
+                                area.width_mm, area.height_mm
+                            ));
+                        }
+
+                        let mut print_start_mode_changed = false;
+                        ui.add_enabled_ui(is_native, |ui| {
+                            if ui.button("포트 새로고침").clicked() {
+                                self.device.refresh_ports();
+                            }
+
+                            let ports = self.device.ports().to_vec();
+                            let combo_width = ui.available_width();
+                            egui::ComboBox::from_id_salt("serial-port-combo")
+                                .width(combo_width)
+                                .selected_text(self.device.selected_port().unwrap_or("포트를 선택하세요"))
+                                .show_ui(ui, |ui| {
+                                    for port in ports {
+                                        let selected = self.device.selected_port() == Some(port.as_str());
+                                        if ui.selectable_label(selected, &port).clicked() {
+                                            self.device.set_selected_port(Some(port.clone()));
+                                        }
+                                    }
+                                });
+
+                            let can_connect =
+                                matches!(self.device.connection_state(), ConnectionState::Disconnected)
+                                    && !self.device.ports().is_empty();
+                            let can_disconnect = matches!(
+                                self.device.connection_state(),
+                                ConnectionState::Connecting | ConnectionState::Connected
+                            );
+                            ui.columns_sized([Size::remainder(1.0), Size::remainder(1.0)], |columns| {
+                                if columns[0]
+                                    .add_enabled(can_connect, egui::Button::new("연결"))
+                                    .clicked()
+                                {
+                                    let result = self.device.connect();
+                                    self.apply_device_action(result);
+                                }
+
+                                if columns[1]
+                                    .add_enabled(can_disconnect, egui::Button::new("연결 해제"))
+                                    .clicked()
+                                {
+                                    self.device.disconnect();
+                                }
+                            });
+
+                            let can_start_print = self.toolpath_plan.is_some()
+                                && self.device.is_connected()
+                                && !self.device.is_job_active();
+                            let can_stop_print = self.device.can_stop_print();
+                            let first_draw_point =
+                                self.toolpath_plan.as_ref().and_then(|plan| plan.first_draw_point);
+                            ui.columns_sized([Size::remainder(1.0), Size::remainder(1.0)], |columns| {
+                                if columns[0]
+                                    .add_enabled(can_start_print, egui::Button::new("프린트 시작"))
+                                    .clicked()
+                                {
+                                    if let Some(plan) = self.toolpath_plan.as_ref() {
+                                        let gcode_lines = plan.gcode_lines.clone();
+                                        let result = self.device.send_job(&gcode_lines);
+                                        self.apply_device_action(result);
+                                    }
+                                }
+
+                                if columns[1]
+                                    .add_enabled(can_stop_print, egui::Button::new("프린트 정지"))
+                                    .clicked()
+                                {
+                                    let result = self.device.stop_job();
+                                    self.apply_device_action(result);
+                                }
+                            });
+
+                            let mut start_with_home =
+                                self.settings.print_start_mode == PrintStartMode::HomeBeforePrint;
+                            if ui.checkbox(&mut start_with_home, "프린트 시작 전에 XY Home 이동").changed() {
+                                self.settings.print_start_mode = if start_with_home {
+                                    PrintStartMode::HomeBeforePrint
+                                } else {
+                                    PrintStartMode::DirectFromCurrentPosition
+                                };
+                                print_start_mode_changed = true;
+                            }
+                            if !start_with_home {
+                                ui.small("끄면 현재 헤드가 첫 시작점과 그리기 높이에 맞춰진 상태에서 바로 그리기 시작합니다.");
+                            }
+
+                            let can_move_to_first_draw_point = first_draw_point.is_some()
+                                && self.device.is_connected()
+                                && !self.device.is_job_active();
+                            if ui
+                                .add_enabled(
+                                    can_move_to_first_draw_point,
+                                    egui::Button::new("첫 시작점으로 이동"),
+                                )
+                                .clicked()
+                            {
+                                if let Some(first_draw_point) = first_draw_point {
+                                    let result = self.device.home_xy_and_move_to(
+                                        first_draw_point.x,
+                                        first_draw_point.y,
+                                        self.settings.travel_feed_rate(),
+                                    );
+                                    self.apply_device_action(result);
+                                }
+                            }
+                            ui.small("Home 후 첫 번째 그리기 시작 위치로 이동합니다.");
+                        });
+
+                        self.show_manual_controls(ui);
+
+                        ui.separator();
+                        ui.heading("설정");
+
+                        let mut settings_changed = false;
+                        settings_changed |= drag_value_row(
+                            ui,
+                            "프린트 가능 너비 (mm)",
+                            &mut self.settings.printable_area.width_mm,
+                            1.0,
+                            10.0..=1_000.0,
+                        );
+                        settings_changed |= drag_value_row(
+                            ui,
+                            "프린트 가능 높이 (mm)",
+                            &mut self.settings.printable_area.height_mm,
+                            1.0,
+                            10.0..=1_000.0,
+                        );
+                        settings_changed |= drag_value_row(
+                            ui,
+                            "프린트 속도 (mm/s)",
+                            &mut self.settings.print_speed_mm_s,
+                            1.0,
+                            1.0..=500.0,
+                        );
+                        settings_changed |= drag_value_row(
+                            ui,
+                            "Z 리프트 (mm)",
+                            &mut self.settings.lift_height_mm,
+                            0.1,
+                            0.1..=25.0,
+                        );
+                        let mut prefer_g2g3 = self.settings.curve_output_mode.prefers_g2g3();
+                        let mut prefer_g5 = self.settings.curve_output_mode.prefers_g5();
+                        let prefer_g2g3_changed =
+                            ui.checkbox(&mut prefer_g2g3, "원호 G-code 사용 (G2/G3)").changed();
+                        let prefer_g5_changed =
+                            ui.checkbox(&mut prefer_g5, "Bezier G-code 사용 (G5)").changed();
+                        if prefer_g2g3_changed || prefer_g5_changed {
+                            self.settings.curve_output_mode =
+                                CurveOutputMode::from_flags(prefer_g2g3, prefer_g5);
+                            settings_changed = true;
+                        }
+                        if prefer_g2g3 && prefer_g5 {
+                            ui.small("코너 둥글림으로 만든 원호는 G2/G3로, 베지어 곡선은 G5로 내보냅니다.");
+                        } else if prefer_g2g3 {
+                            ui.small("코너 둥글림으로 만든 원호만 G2/G3로 내보내고, 나머지는 선분으로 유지합니다.");
+                        } else if prefer_g5 {
+                            ui.small("지원 펌웨어에서는 곡선을 G5로 내보내고, 미리보기는 동일한 IR에서 계산합니다.");
+                        }
+
+                        if ui
+                            .checkbox(
+                                &mut self.settings.corner_smoothing_enabled,
+                                "급한 코너를 미세하게 둥글게 처리",
+                            )
+                            .changed()
+                        {
+                            settings_changed = true;
+                        }
+                        if self.settings.corner_smoothing_enabled {
+                            settings_changed |= drag_value_row(
+                                ui,
+                                "코너 둥글림 반경 (mm)",
+                                &mut self.settings.corner_smoothing_radius_mm,
+                                0.05,
+                                0.1..=10.0,
+                            );
+                            settings_changed |= drag_value_row(
+                                ui,
+                                "코너 둥글림 시작 각도 (°)",
+                                &mut self.settings.corner_smoothing_angle_deg,
+                                1.0,
+                                5.0..=170.0,
+                            );
+                            ui.small("선분-곡선-원호 연결부를 포함해, 끝 접선 각도가 이 값 이상일 때만 짧은 원호를 넣습니다.");
+                        }
+
+                        ui.separator();
+                        ui.heading("SVG 배치");
+
+                        let current_svg_size = self.toolpath_plan.as_ref().map(|plan| plan.drawing_bounds);
+                        let svg_is_out_of_bounds =
+                            self.toolpath_plan.as_ref().is_some_and(|plan| plan.is_out_of_bounds);
+                        let mut placement_changed = false;
+
+                        if let Some(svg_placement) = self.svg_placement.as_mut() {
+                            let mut center_x = svg_placement.placement.center_mm.x;
+                            let mut center_y = svg_placement.placement.center_mm.y;
+                            let mut scale_percent = svg_placement.scale_percent();
+
+                            let center_x_changed = drag_value_row(
+                                ui,
+                                "SVG 중심 X (mm)",
+                                &mut center_x,
+                                1.0,
+                                -5_000.0..=5_000.0,
+                            );
+                            let center_y_changed = drag_value_row(
+                                ui,
+                                "SVG 중심 Y (mm)",
+                                &mut center_y,
+                                1.0,
+                                -5_000.0..=5_000.0,
+                            );
+                            let scale_changed = drag_value_row(
+                                ui,
+                                "SVG 크기 (%)",
+                                &mut scale_percent,
+                                1.0,
+                                1.0..=1_000.0,
+                            );
+
+                            if center_x_changed {
+                                svg_placement.placement.center_mm.x = center_x;
+                                placement_changed = true;
+                            }
+                            if center_y_changed {
+                                svg_placement.placement.center_mm.y = center_y;
+                                placement_changed = true;
+                            }
+                            if scale_changed {
+                                svg_placement.set_scale_percent(scale_percent);
+                                placement_changed = true;
+                            }
+
+                            if let Some(size) = current_svg_size {
+                                ui.small(format!("현재 크기: {:.1} x {:.1} mm", size.x, size.y));
+                            }
+                            ui.small("100%는 SVG 좌표 1단위를 1mm로 본 초기 크기입니다.");
+                            if svg_is_out_of_bounds {
+                                ui.colored_label(
+                                    colors::warning(),
+                                    "SVG가 현재 프린트 가능 영역을 벗어났습니다.",
+                                );
+                            }
+                        } else {
+                            ui.small("SVG를 불러오면 위치와 크기를 조절할 수 있습니다.");
+                        }
+
+                        if settings_changed || placement_changed || print_start_mode_changed {
+                            self.rebuild_toolpath();
+                        }
+
+                        ui.separator();
+                        ui.heading("잡 정보");
+
+                        if let Some(plan) = &self.toolpath_plan {
+                            ui.label(format!("SVG: {}", plan.source_name));
+                            ui.label(format!(
+                                "그려지는 범위: {:.1} x {:.1} mm",
+                                plan.drawing_bounds.x, plan.drawing_bounds.y
+                            ));
+                            ui.label(format!("스트로크 수: {}", plan.stats.stroke_count));
+                            ui.label(format!("세그먼트 수: {}", plan.stats.segment_count));
+                            ui.label(format!("드로잉 거리: {:.1} mm", plan.stats.drawing_distance_mm));
+                            ui.label(format!("이동 거리: {:.1} mm", plan.stats.travel_distance_mm));
+                            ui.label(format!("예상 소요 시간: {:.1} s", plan.stats.estimated_duration_s));
+
+                            if !plan.warnings.is_empty() {
+                                ui.separator();
+                                for warning in &plan.warnings {
+                                    ui.colored_label(colors::warning(), warning);
+                                }
+                            }
+                        } else {
+                            ui.label("아직 변환된 SVG가 없습니다.");
+                        }
+
+                        if let Some(error) = &self.error_message {
+                            ui.separator();
+                            ui.colored_label(colors::error(), error);
+                        }
+
+                        if let Some(error) = self.device.last_error() {
+                            ui.colored_label(colors::error(), error);
+                        }
+
+                        ui.separator();
+                        ui.heading("장치 로그");
+                        let log_width = ui.available_width();
+                        egui::ScrollArea::vertical().max_height(180.0).auto_shrink([false, false]).show(
+                            ui,
+                            |ui| {
+                                ui.set_min_width(log_width);
+                                for line in self.device.log_lines().rev() {
+                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                                        ui.add_sized([log_width, 0.0], egui::Label::new(line).wrap());
+                                    });
+                                }
+                            },
+                        );
+                    });
             });
     }
 
@@ -800,8 +814,10 @@ impl PenarticApp {
 
         egui::CentralPanel::default().show_inside(root_ui, |ui| {
             egui::Frame::canvas(ui.style()).show(ui, |ui| {
-                let preview_size = egui::vec2(ui.available_width(), ui.available_height().max(1.0));
-                ui.set_min_height(preview_size.y);
+                let max_rect = ui.max_rect();
+                let preview_size =
+                    egui::vec2(max_rect.width().max(1.0), max_rect.height().max(1.0));
+                ui.set_min_size(preview_size);
                 let preview_rect = self.preview_renderer.show(
                     ui,
                     preview_size,

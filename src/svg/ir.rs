@@ -123,7 +123,6 @@ impl SvgIrSegment {
         }
     }
 
-    #[cfg(test)]
     pub fn end_point(&self) -> Vec2 {
         match self {
             Self::Line(segment) => segment.end,
@@ -218,6 +217,42 @@ impl SvgIrSegment {
         }
     }
 
+    pub fn point_at(&self, t: f32) -> Vec2 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Self::Line(segment) => segment.start.lerp(segment.end, t),
+            Self::Quadratic(segment) => quadratic(segment.start, segment.control, segment.end, t),
+            Self::Cubic(segment) => {
+                cubic(segment.start, segment.control_a, segment.control_b, segment.end, t)
+            }
+        }
+    }
+
+    pub fn tangent_at(&self, t: f32) -> Vec2 {
+        let derivative = self.derivative_at(t.clamp(0.0, 1.0));
+        if derivative.length_squared() > SEGMENT_EPSILON * SEGMENT_EPSILON {
+            return derivative.normalize();
+        }
+
+        for fallback_t in [0.001_f32, 0.01, 0.99, 0.999] {
+            let derivative = self.derivative_at(fallback_t);
+            if derivative.length_squared() > SEGMENT_EPSILON * SEGMENT_EPSILON {
+                return derivative.normalize();
+            }
+        }
+
+        Vec2::X
+    }
+
+    pub fn point_and_tangent_at_arc_length(
+        &self,
+        target_length: f32,
+        total_length: f32,
+    ) -> (Vec2, Vec2) {
+        let t = self.t_at_arc_length(target_length, total_length);
+        (self.point_at(t), self.tangent_at(t))
+    }
+
     fn t_at_arc_length(&self, target_length: f32, total_length: f32) -> f32 {
         if target_length <= SEGMENT_EPSILON {
             return 0.0;
@@ -254,12 +289,17 @@ impl SvgIrSegment {
         1.0
     }
 
-    fn point_at(&self, t: f32) -> Vec2 {
+    fn derivative_at(&self, t: f32) -> Vec2 {
         match self {
-            Self::Line(segment) => segment.start.lerp(segment.end, t),
-            Self::Quadratic(segment) => quadratic(segment.start, segment.control, segment.end, t),
+            Self::Line(segment) => segment.end - segment.start,
+            Self::Quadratic(segment) => {
+                2.0 * (1.0 - t) * (segment.control - segment.start)
+                    + 2.0 * t * (segment.end - segment.control)
+            }
             Self::Cubic(segment) => {
-                cubic(segment.start, segment.control_a, segment.control_b, segment.end, t)
+                3.0 * (1.0 - t).powi(2) * (segment.control_a - segment.start)
+                    + 6.0 * (1.0 - t) * t * (segment.control_b - segment.control_a)
+                    + 3.0 * t.powi(2) * (segment.end - segment.control_b)
             }
         }
     }
