@@ -282,7 +282,7 @@ impl PenarticApp {
         ui.columns(2, |columns| {
             columns[0].label("X/Y");
             columns[0].separator();
-            egui::Grid::new("xy-jog-grid").spacing(egui::vec2(8.0, 8.0)).show(
+            egui::Grid::new("xy-jog-grid").spacing(egui::vec2(4.0, 4.0)).show(
                 &mut columns[0],
                 |ui| {
                     spacer_button_cell(ui);
@@ -297,7 +297,7 @@ impl PenarticApp {
                         let result = self.device.jog_xy(-self.jog_step_mm, 0.0, jog_feed_rate);
                         self.apply_device_action(result);
                     }
-                    if control_button(ui, "홈", can_control).clicked() {
+                    if control_button(ui, "🏠", can_control).clicked() {
                         let result = self.device.home_xy();
                         self.apply_device_action(result);
                     }
@@ -319,7 +319,7 @@ impl PenarticApp {
 
             columns[1].label("Z");
             columns[1].separator();
-            egui::Grid::new("z-jog-grid").spacing(egui::vec2(8.0, 8.0)).show(
+            egui::Grid::new("z-jog-grid").spacing(egui::vec2(4.0, 4.0)).show(
                 &mut columns[1],
                 |ui| {
                     if control_button(ui, "↑", can_control).clicked() {
@@ -328,7 +328,7 @@ impl PenarticApp {
                     }
                     ui.end_row();
 
-                    if control_button(ui, "홈", can_control).clicked() {
+                    if control_button(ui, "🏠", can_control).clicked() {
                         let result = self.device.home_z();
                         self.apply_device_action(result);
                     }
@@ -739,11 +739,11 @@ fn print_state_color(print_state: PrintState) -> egui::Color32 {
 }
 
 fn control_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
-    ui.add_enabled(enabled, egui::Button::new(label).min_size(egui::vec2(48.0, 44.0)))
+    ui.add_enabled(enabled, egui::Button::new(label).min_size(egui::vec2(32.0, 32.0)))
 }
 
 fn spacer_button_cell(ui: &mut egui::Ui) {
-    ui.allocate_exact_size(egui::vec2(48.0, 44.0), egui::Sense::hover());
+    ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
 }
 
 fn format_jog_step(step: f32) -> &'static str {
