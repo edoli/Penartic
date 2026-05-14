@@ -258,37 +258,28 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
             gcode_lines.push("G28 X Y".to_owned());
             lifted_origin
         }
-        PrintStartMode::DirectFromCurrentPosition => first_draw_point
-            .map(|point| vec3(point.x, point.y, 0.0))
-            .unwrap_or_else(|| vec3(0.0, 0.0, 0.0)),
+        PrintStartMode::DirectFromCurrentPosition => vec3(0.0, 0.0, 0.0),
     };
 
     let stroke_count = stroke_primitives.len();
     let mut active_feed_rate = None;
-    let mut is_first_stroke = true;
-
     for primitives in &stroke_primitives {
         let start_draw = primitives
             .first()
             .map(|primitive| primitive.start_point())
             .map(|point| vec3(point.x, point.y, 0.0))
             .unwrap();
-        if settings.print_start_mode == PrintStartMode::HomeBeforePrint || !is_first_stroke {
-            push_position_to_stroke_start(
-                &mut segments,
-                &mut segment_end_times_s,
-                &mut gcode_lines,
-                &mut current,
-                start_draw,
-                lift,
-                travel_speed,
-                travel_feed,
-                &mut active_feed_rate,
-            );
-        } else {
-            debug_assert!(current.distance_squared(start_draw) <= 1e-6);
-            current = start_draw;
-        }
+        push_position_to_stroke_start(
+            &mut segments,
+            &mut segment_end_times_s,
+            &mut gcode_lines,
+            &mut current,
+            start_draw,
+            lift,
+            travel_speed,
+            travel_feed,
+            &mut active_feed_rate,
+        );
 
         for primitive in primitives {
             append_draw_primitive(
@@ -315,7 +306,6 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
             travel_feed,
         );
         active_feed_rate = None;
-        is_first_stroke = false;
     }
 
     gcode_lines.push("M400".to_owned());
@@ -958,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_start_skips_initial_home_and_z_motion() {
+    fn direct_start_lifts_before_moving_to_first_draw_point() {
         let plan = build_plan(
             line_prepared_svg(),
             &ToolSettings {
@@ -973,12 +963,18 @@ mod tests {
 
         assert_eq!(plan.gcode_lines[2], "G21");
         assert_eq!(plan.gcode_lines[3], "G90");
-        assert_eq!(plan.gcode_lines[4], "G1 X40.00 Y10.00 F1500");
+        assert_eq!(plan.gcode_lines[4], "G91");
+        assert_eq!(plan.gcode_lines[5], "G1 Z2.000 F3000");
+        assert_eq!(plan.gcode_lines[6], "G90");
+        assert_eq!(plan.gcode_lines[7], "G1 X10.00 Y10.00 F3000");
+        assert_eq!(plan.gcode_lines[8], "G91");
+        assert_eq!(plan.gcode_lines[9], "G1 Z-2.000 F3000");
+        assert_eq!(plan.gcode_lines[10], "G90");
+        assert_eq!(plan.gcode_lines[11], "G1 X40.00 Y10.00 F1500");
         assert!(!plan.gcode_lines.iter().any(|line| line == "G28 X Y"));
-        assert!(!plan.gcode_lines[..5].iter().any(|line| line.starts_with("G1 Z")));
         assert!(matches!(
             plan.segments.first().map(|segment| segment.kind),
-            Some(MotionKind::Draw)
+            Some(MotionKind::Travel)
         ));
     }
 

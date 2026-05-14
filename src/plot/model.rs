@@ -100,7 +100,7 @@ impl Default for ToolSettings {
         Self {
             printable_area: PrintableArea::default(),
             print_speed_mm_s: 30.0,
-            lift_height_mm: 2.5,
+            lift_height_mm: 0.5,
             print_start_mode: PrintStartMode::default(),
             curve_output_mode: CurveOutputMode::default(),
             corner_smoothing_enabled: default_corner_smoothing_enabled(),
@@ -113,8 +113,8 @@ impl Default for ToolSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PrintStartMode {
-    #[default]
     HomeBeforePrint,
+    #[default]
     DirectFromCurrentPosition,
 }
 
@@ -302,5 +302,12 @@ mod tests {
         let partial = partial.expect("expected an in-flight segment at 50% of total time");
         assert!((partial.end.x - 55.0).abs() < 1e-3);
         assert!((pen_position.x - 55.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn default_settings_use_short_lift_and_direct_start() {
+        let settings = ToolSettings::default();
+        assert_eq!(settings.lift_height_mm, 0.5);
+        assert_eq!(settings.print_start_mode, PrintStartMode::DirectFromCurrentPosition);
     }
 }

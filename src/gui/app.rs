@@ -575,7 +575,9 @@ impl PenarticApp {
                                 print_start_mode_changed = true;
                             }
                             if !start_with_home {
-                                ui.small("끄면 현재 헤드가 첫 시작점과 그리기 높이에 맞춰진 상태에서 바로 그리기 시작합니다.");
+                                ui.small(
+                                    "끄면 XY Home 없이 Z 리프트 후 첫 시작점으로 이동해 그리기 시작합니다.",
+                                );
                             }
 
                             let can_move_to_first_draw_point = first_draw_point.is_some()
@@ -592,12 +594,13 @@ impl PenarticApp {
                                     let result = self.device.home_xy_and_move_to(
                                         first_draw_point.x,
                                         first_draw_point.y,
+                                        self.settings.lift_height_mm,
                                         self.settings.travel_feed_rate(),
                                     );
                                     self.apply_device_action(result);
                                 }
                             }
-                            ui.small("Home 후 첫 번째 그리기 시작 위치로 이동합니다.");
+                            ui.small("Z 리프트 후 Home하고 첫 번째 그리기 시작 위치로 이동합니다.");
                         });
 
                         self.show_manual_controls(ui);

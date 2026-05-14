@@ -339,12 +339,18 @@ impl DeviceController {
         &mut self,
         x_mm: f32,
         y_mm: f32,
+        lift_height_mm: f32,
         feed_rate_mm_min: f32,
     ) -> Result<(), String> {
+        let lift_command = build_relative_move_command(0.0, 0.0, lift_height_mm, feed_rate_mm_min)
+            .ok_or_else(|| "Z 리프트 이동 거리가 없습니다.".to_owned())?;
         self.queue_manual_commands(
             "첫 그리기 시작 위치 이동 명령을 전송했습니다.",
             vec![
                 "G21".to_owned(),
+                "M400".to_owned(),
+                "G91".to_owned(),
+                lift_command,
                 "M400".to_owned(),
                 "G90".to_owned(),
                 "G28 X Y".to_owned(),
