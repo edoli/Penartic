@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 use crate::plot::model::PrintableArea;
 
 const DEVICE_LOG_LIMIT: usize = 48;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const MAX_IN_FLIGHT_LINES: usize = 8;
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,10 +15,19 @@ pub enum ConnectionState {
     Connected,
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrintState {
+    Idle,
+    Printing,
+    Stopping,
+}
+
 pub struct DeviceController {
     available_ports: Vec<String>,
     selected_port: Option<String>,
     connection_state: ConnectionState,
+    print_state: PrintState,
     firmware_summary: Option<String>,
     detected_area: Option<PrintableArea>,
     log: VecDeque<String>,
@@ -32,6 +43,7 @@ impl DeviceController {
             available_ports: Vec::new(),
             selected_port: None,
             connection_state: ConnectionState::Disconnected,
+            print_state: PrintState::Idle,
             firmware_summary: None,
             detected_area: None,
             log: VecDeque::new(),
@@ -97,12 +109,24 @@ impl DeviceController {
     pub fn status_text(&self) -> String {
         match self.connection_state {
             ConnectionState::Unsupported => "Web preview only".to_owned(),
-            ConnectionState::Disconnected => "Disconnected".to_owned(),
-            ConnectionState::Connecting => "Connecting…".to_owned(),
+            ConnectionState::Disconnected => "연결 안됨".to_owned(),
+            ConnectionState::Connecting => "연결 중…".to_owned(),
             ConnectionState::Connected => match &self.selected_port {
-                Some(port) => format!("Connected: {port}"),
-                None => "Connected".to_owned(),
+                Some(port) => format!("연결됨: {port}"),
+                None => "연결됨".to_owned(),
             },
+        }
+    }
+
+    pub fn print_state(&self) -> PrintState {
+        self.print_state
+    }
+
+    pub fn print_state_text(&self) -> &'static str {
+        match self.print_state {
+            PrintState::Idle => "대기 중",
+            PrintState::Printing => "프린트 중",
+            PrintState::Stopping => "정지 요청됨",
         }
     }
 
@@ -116,6 +140,14 @@ impl DeviceController {
 
     pub fn is_connected(&self) -> bool {
         self.connection_state == ConnectionState::Connected
+    }
+
+    pub fn is_job_active(&self) -> bool {
+        matches!(self.print_state, PrintState::Printing | PrintState::Stopping)
+    }
+
+    pub fn can_stop_print(&self) -> bool {
+        self.is_connected() && self.is_job_active()
     }
 
     pub fn last_error(&self) -> Option<&str> {
@@ -146,6 +178,7 @@ impl DeviceController {
             let (worker, command_tx) = NativeWorker::spawn(port_name.clone())?;
             self.worker = Some(worker);
             self.connection_state = ConnectionState::Connecting;
+            self.print_state = PrintState::Idle;
             self.last_error = None;
             self.firmware_summary = None;
             self.detected_area = None;
@@ -153,7 +186,7 @@ impl DeviceController {
             self.push_log(format!("{port_name} 에 연결을 시도합니다."));
 
             if command_tx
-                .send(WorkerCommand::Queue(vec!["M115".to_owned(), "M503".to_owned()]))
+                .send(WorkerCommand::QueueManual(vec!["M115".to_owned(), "M503".to_owned()]))
                 .is_err()
             {
                 self.worker = None;
@@ -175,6 +208,7 @@ impl DeviceController {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.connection_state = ConnectionState::Disconnected;
+            self.print_state = PrintState::Idle;
         }
     }
 
@@ -187,17 +221,78 @@ impl DeviceController {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if self.is_job_active() {
+                return Err("이미 프린트가 진행 중입니다.".to_owned());
+            }
+
             let worker =
                 self.worker.as_ref().ok_or_else(|| "먼저 장치를 연결하세요.".to_owned())?;
 
             worker
                 .command_tx
-                .send(WorkerCommand::Queue(gcode_lines.to_vec()))
+                .send(WorkerCommand::QueueJob(gcode_lines.to_vec()))
                 .map_err(|_| "장치 작업 큐에 G-code를 전달하지 못했습니다.".to_owned())?;
 
+            self.print_state = PrintState::Printing;
             self.push_log(format!("G-code {}줄을 장치로 전송 큐에 올렸습니다.", gcode_lines.len()));
             Ok(())
         }
+    }
+
+    pub fn stop_job(&mut self) -> Result<(), String> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return Err("웹 빌드에서는 장치 출력을 중지할 수 없습니다.".to_owned());
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if !self.can_stop_print() {
+                return Err("현재 중지할 프린트 작업이 없습니다.".to_owned());
+            }
+
+            let worker =
+                self.worker.as_ref().ok_or_else(|| "먼저 장치를 연결하세요.".to_owned())?;
+            worker
+                .command_tx
+                .send(WorkerCommand::CancelJob)
+                .map_err(|_| "프린트 중지 명령을 전달하지 못했습니다.".to_owned())?;
+
+            self.print_state = PrintState::Stopping;
+            self.push_log("프린트 중지를 요청했습니다. 장치가 지원하면 즉시 정지합니다.");
+            Ok(())
+        }
+    }
+
+    pub fn jog_xy(
+        &mut self,
+        delta_x_mm: f32,
+        delta_y_mm: f32,
+        feed_rate_mm_min: f32,
+    ) -> Result<(), String> {
+        let command = build_relative_move_command(delta_x_mm, delta_y_mm, 0.0, feed_rate_mm_min)
+            .ok_or_else(|| "이동할 축이 없습니다.".to_owned())?;
+        self.queue_manual_commands(
+            "수동 X/Y 이동 명령을 전송했습니다.",
+            vec!["G91".to_owned(), command, "G90".to_owned()],
+        )
+    }
+
+    pub fn jog_z(&mut self, delta_z_mm: f32, feed_rate_mm_min: f32) -> Result<(), String> {
+        let command = build_relative_move_command(0.0, 0.0, delta_z_mm, feed_rate_mm_min)
+            .ok_or_else(|| "이동할 축이 없습니다.".to_owned())?;
+        self.queue_manual_commands(
+            "수동 Z 이동 명령을 전송했습니다.",
+            vec!["G91".to_owned(), command, "G90".to_owned()],
+        )
+    }
+
+    pub fn home_xy(&mut self) -> Result<(), String> {
+        self.queue_manual_commands("XY 홈 이동 명령을 전송했습니다.", vec!["G28 X Y".to_owned()])
+    }
+
+    pub fn home_z(&mut self) -> Result<(), String> {
+        self.queue_manual_commands("Z 홈 이동 명령을 전송했습니다.", vec!["G28 Z".to_owned()])
     }
 
     pub fn tick(&mut self) -> Option<PrintableArea> {
@@ -242,12 +337,22 @@ impl DeviceController {
                     WorkerEvent::Error(message) => {
                         self.last_error = Some(message.clone());
                         self.connection_state = ConnectionState::Disconnected;
+                        self.print_state = PrintState::Idle;
                         self.push_log(format!("장치 오류: {message}"));
                         self.worker = None;
                         break;
                     }
+                    WorkerEvent::JobCompleted => {
+                        self.print_state = PrintState::Idle;
+                        self.push_log("프린트가 완료되었습니다.");
+                    }
+                    WorkerEvent::JobCancelled => {
+                        self.print_state = PrintState::Idle;
+                        self.push_log("프린트가 중지되었습니다.");
+                    }
                     WorkerEvent::Disconnected => {
                         self.connection_state = ConnectionState::Disconnected;
+                        self.print_state = PrintState::Idle;
                         self.worker = None;
                         break;
                     }
@@ -262,6 +367,34 @@ impl DeviceController {
         self.log.push_back(line.into());
         while self.log.len() > DEVICE_LOG_LIMIT {
             self.log.pop_front();
+        }
+    }
+
+    fn queue_manual_commands(
+        &mut self,
+        log_line: &str,
+        commands: Vec<String>,
+    ) -> Result<(), String> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (log_line, commands);
+            return Err("웹 빌드에서는 수동 장치 제어를 지원하지 않습니다.".to_owned());
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.is_job_active() {
+                return Err("프린트 중에는 수동 제어를 사용할 수 없습니다.".to_owned());
+            }
+
+            let worker =
+                self.worker.as_ref().ok_or_else(|| "먼저 장치를 연결하세요.".to_owned())?;
+            worker
+                .command_tx
+                .send(WorkerCommand::QueueManual(commands))
+                .map_err(|_| "수동 제어 명령을 전달하지 못했습니다.".to_owned())?;
+            self.push_log(log_line);
+            Ok(())
         }
     }
 }
@@ -290,7 +423,9 @@ impl NativeWorker {
 
 #[cfg(not(target_arch = "wasm32"))]
 enum WorkerCommand {
-    Queue(Vec<String>),
+    QueueJob(Vec<String>),
+    QueueManual(Vec<String>),
+    CancelJob,
     Disconnect,
 }
 
@@ -298,6 +433,8 @@ enum WorkerCommand {
 enum WorkerEvent {
     Connected,
     Line(String),
+    JobCompleted,
+    JobCancelled,
     Error(String),
     Disconnected,
 }
@@ -319,24 +456,74 @@ fn run_worker(
 
         event_tx.send(WorkerEvent::Connected).map_err(|error| error.to_string())?;
 
-        let mut queued_lines = VecDeque::new();
-        let mut waiting_for_ok_since: Option<Instant> = None;
+        let mut queued_lines: VecDeque<QueuedLine> = VecDeque::new();
+        let mut queued_job_count = 0usize;
+        let mut in_flight_sources = VecDeque::new();
+        let mut in_flight_job_count = 0usize;
+        let mut oldest_in_flight_since: Option<Instant> = None;
+        let mut job_cancelled = false;
         let mut read_buffer = [0_u8; 512];
         let mut pending_text = String::new();
 
         loop {
             while let Ok(command) = command_rx.try_recv() {
                 match command {
-                    WorkerCommand::Queue(lines) => queued_lines.extend(lines),
+                    WorkerCommand::QueueJob(lines) => {
+                        if !lines.is_empty() {
+                            job_cancelled = false;
+                        }
+                        queued_job_count += lines.len();
+                        queued_lines.extend(
+                            lines
+                                .into_iter()
+                                .map(|line| QueuedLine { line, source: QueuedLineSource::Job }),
+                        );
+                    }
+                    WorkerCommand::QueueManual(lines) => {
+                        queued_lines.extend(
+                            lines
+                                .into_iter()
+                                .map(|line| QueuedLine { line, source: QueuedLineSource::Manual }),
+                        );
+                    }
+                    WorkerCommand::CancelJob => {
+                        job_cancelled = true;
+                        queued_lines = queued_lines
+                            .into_iter()
+                            .filter(|queued| queued.source != QueuedLineSource::Job)
+                            .collect();
+                        queued_job_count = 0;
+                        queued_lines.push_front(QueuedLine {
+                            line: "M400".to_owned(),
+                            source: QueuedLineSource::Stop,
+                        });
+                        queued_lines.push_front(QueuedLine {
+                            line: "M410".to_owned(),
+                            source: QueuedLineSource::Stop,
+                        });
+                        if in_flight_job_count == 0 {
+                            event_tx
+                                .send(WorkerEvent::JobCancelled)
+                                .map_err(|error| error.to_string())?;
+                            job_cancelled = false;
+                        }
+                    }
                     WorkerCommand::Disconnect => return Ok(()),
                 }
             }
 
-            if waiting_for_ok_since.is_none() {
-                if let Some(line) = queued_lines.pop_front() {
-                    write_line(&mut *port, &line).map_err(|error| error.to_string())?;
-                    waiting_for_ok_since = Some(Instant::now());
+            while in_flight_sources.len() < MAX_IN_FLIGHT_LINES {
+                let Some(queued) = queued_lines.pop_front() else {
+                    break;
+                };
+
+                write_line(&mut *port, &queued.line).map_err(|error| error.to_string())?;
+                if queued.source == QueuedLineSource::Job {
+                    queued_job_count = queued_job_count.saturating_sub(1);
+                    in_flight_job_count += 1;
                 }
+                in_flight_sources.push_back(queued.source);
+                oldest_in_flight_since.get_or_insert_with(Instant::now);
             }
 
             match port.read(&mut read_buffer) {
@@ -351,8 +538,24 @@ fn run_worker(
                             continue;
                         }
 
-                        if waiting_for_ok_since.is_some() && is_ack_line(&line) {
-                            waiting_for_ok_since = None;
+                        if is_ack_line(&line) {
+                            if let Some(source) = in_flight_sources.pop_front() {
+                                if source == QueuedLineSource::Job {
+                                    in_flight_job_count = in_flight_job_count.saturating_sub(1);
+                                    if queued_job_count == 0 && in_flight_job_count == 0 {
+                                        event_tx
+                                            .send(if job_cancelled {
+                                                WorkerEvent::JobCancelled
+                                            } else {
+                                                WorkerEvent::JobCompleted
+                                            })
+                                            .map_err(|error| error.to_string())?;
+                                        job_cancelled = false;
+                                    }
+                                }
+                            }
+                            oldest_in_flight_since =
+                                (!in_flight_sources.is_empty()).then_some(Instant::now());
                         }
 
                         event_tx
@@ -362,10 +565,26 @@ fn run_worker(
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
-                    if waiting_for_ok_since
+                    if oldest_in_flight_since
                         .is_some_and(|started| started.elapsed() > Duration::from_secs(2))
                     {
-                        waiting_for_ok_since = None;
+                        if let Some(source) = in_flight_sources.pop_front() {
+                            if source == QueuedLineSource::Job {
+                                in_flight_job_count = in_flight_job_count.saturating_sub(1);
+                                if queued_job_count == 0 && in_flight_job_count == 0 {
+                                    event_tx
+                                        .send(if job_cancelled {
+                                            WorkerEvent::JobCancelled
+                                        } else {
+                                            WorkerEvent::JobCompleted
+                                        })
+                                        .map_err(|error| error.to_string())?;
+                                    job_cancelled = false;
+                                }
+                            }
+                        }
+                        oldest_in_flight_since =
+                            (!in_flight_sources.is_empty()).then_some(Instant::now());
                     }
 
                     std::thread::sleep(Duration::from_millis(10));
@@ -424,6 +643,45 @@ fn detect_build_volume(line: &str) -> Option<PrintableArea> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QueuedLineSource {
+    Job,
+    Manual,
+    Stop,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct QueuedLine {
+    line: String,
+    source: QueuedLineSource,
+}
+
+fn build_relative_move_command(
+    delta_x_mm: f32,
+    delta_y_mm: f32,
+    delta_z_mm: f32,
+    feed_rate_mm_min: f32,
+) -> Option<String> {
+    let mut command = "G0".to_owned();
+
+    if delta_x_mm.abs() > f32::EPSILON {
+        command.push_str(&format!(" X{delta_x_mm:.3}"));
+    }
+    if delta_y_mm.abs() > f32::EPSILON {
+        command.push_str(&format!(" Y{delta_y_mm:.3}"));
+    }
+    if delta_z_mm.abs() > f32::EPSILON {
+        command.push_str(&format!(" Z{delta_z_mm:.3}"));
+    }
+    if command == "G0" {
+        return None;
+    }
+
+    command.push_str(&format!(" F{:.0}", feed_rate_mm_min.max(60.0)));
+    Some(command)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn extract_axis_value(line: &str, axis: char) -> Option<f32> {
     let bytes = line.as_bytes();
     let axis = axis as u8;
@@ -468,5 +726,11 @@ mod tests {
         let size = detect_build_volume("echo:  M208 X220.00 Y220.00 Z250.00 S0").unwrap();
         assert_eq!(size.width_mm, 220.0);
         assert_eq!(size.height_mm, 220.0);
+    }
+
+    #[test]
+    fn builds_relative_xy_move_command() {
+        let command = build_relative_move_command(10.0, -2.5, 0.0, 1800.0).unwrap();
+        assert_eq!(command, "G0 X10.000 Y-2.500 F1800");
     }
 }

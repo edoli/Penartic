@@ -6,29 +6,44 @@ use eframe::{
         wgpu::{self, util::DeviceExt as _},
     },
 };
-use glam::{Mat4, Vec3, vec3};
+use glam::{Mat4, Vec2, Vec3, vec3};
 
-use crate::plot::model::{MotionKind, MotionSegment, ToolpathPlan};
+use crate::{
+    plot::model::{MotionKind, MotionSegment, ToolpathPlan},
+    res::colors,
+};
 
 #[derive(Debug, Clone)]
 pub struct ViewportState {
     yaw: f32,
     pitch: f32,
     zoom: f32,
+    pan: Vec2,
 }
 
 impl Default for ViewportState {
     fn default() -> Self {
-        Self { yaw: 0.65, pitch: 0.75, zoom: 1.15 }
+        Self { yaw: 0.65, pitch: 0.75, zoom: 1.15, pan: Vec2::ZERO }
     }
 }
 
 impl ViewportState {
-    fn handle_input(&mut self, response: &egui::Response, ui: &egui::Ui) {
-        if response.dragged() {
+    fn handle_input(&mut self, response: &egui::Response, ui: &egui::Ui, scene_extent: f32) {
+        if response.dragged_by(egui::PointerButton::Primary) {
             let drag = response.drag_motion();
             self.yaw -= drag.x * 0.01;
             self.pitch = (self.pitch + drag.y * 0.01).clamp(0.2, 1.35);
+        }
+
+        if response.dragged_by(egui::PointerButton::Secondary) {
+            let drag = response.drag_motion();
+            let pan_scale = scene_extent.max(40.0)
+                / response.rect.width().min(response.rect.height()).max(1.0)
+                * self.zoom;
+            let right = vec3(-self.yaw.sin(), self.yaw.cos(), 0.0);
+            let forward = vec3(self.yaw.cos(), self.yaw.sin(), 0.0);
+            let pan_delta = (-right * drag.x + forward * drag.y) * pan_scale;
+            self.pan += pan_delta.truncate();
         }
 
         if response.hovered() {
@@ -138,13 +153,16 @@ impl PreviewRenderer {
     ) {
         let desired = egui::vec2(desired_size.x.max(1.0), desired_size.y.max(1.0));
         let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::drag());
-        state.handle_input(&response, ui);
+        let scene_extent = plan
+            .map(|plan| plan.printable_area.width_mm.max(plan.printable_area.height_mm))
+            .unwrap_or(220.0);
+        state.handle_input(&response, ui, scene_extent);
 
-        ui.painter().rect_filled(rect, 10.0, egui::Color32::from_rgb(14, 18, 24));
+        ui.painter().rect_filled(rect, 10.0, colors::preview_background());
         ui.painter().rect_stroke(
             rect,
             10.0,
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 53, 66)),
+            egui::Stroke::new(1.0, colors::preview_border()),
             egui::StrokeKind::Outside,
         );
 
@@ -154,7 +172,7 @@ impl PreviewRenderer {
                 egui::Align2::CENTER_CENTER,
                 "WGPU preview unavailable",
                 egui::TextStyle::Heading.resolve(ui.style()),
-                egui::Color32::LIGHT_RED,
+                colors::error(),
             );
             return;
         }
@@ -165,7 +183,7 @@ impl PreviewRenderer {
                 egui::Align2::CENTER_CENTER,
                 "SVG를 불러오면 3D 미리보기가 여기에 표시됩니다.",
                 egui::TextStyle::Heading.resolve(ui.style()),
-                egui::Color32::LIGHT_GRAY,
+                colors::muted_text(),
             );
             return;
         };
@@ -196,8 +214,11 @@ impl PreviewGeometry {
         state: &ViewportState,
     ) -> Self {
         let aspect = (viewport_size.x / viewport_size.y).max(0.1);
-        let center =
-            vec3(plan.printable_area.width_mm * 0.5, plan.printable_area.height_mm * 0.5, 0.0);
+        let center = vec3(
+            plan.printable_area.width_mm * 0.5 + state.pan.x,
+            plan.printable_area.height_mm * 0.5 + state.pan.y,
+            0.0,
+        );
 
         let scene_radius =
             plan.printable_area.width_mm.max(plan.printable_area.height_mm).max(80.0) * 0.9;
@@ -362,9 +383,9 @@ fn append_bed(
 ) {
     let w = plan.printable_area.width_mm;
     let h = plan.printable_area.height_mm;
-    let plane_color = [0.08, 0.11, 0.16, 1.0];
-    let edge_color = [0.46, 0.54, 0.66, 1.0];
-    let grid_color = [0.22, 0.28, 0.36, 1.0];
+    let plane_color = colors::preview_plane();
+    let edge_color = colors::preview_edge();
+    let grid_color = colors::preview_grid();
 
     append_triangle(
         triangle_vertices,
@@ -414,8 +435,8 @@ fn append_segment(
     view_projection: Mat4,
 ) {
     let color = match segment.kind {
-        MotionKind::Travel => [0.72, 0.72, 0.74, 1.0],
-        MotionKind::Draw => [0.24, 0.72, 1.0, 1.0],
+        MotionKind::Travel => colors::preview_travel(),
+        MotionKind::Draw => colors::preview_draw(),
     };
     append_line(line_vertices, segment.start, segment.end, color, view_projection);
 }
@@ -425,7 +446,7 @@ fn append_pen(triangle_vertices: &mut Vec<GpuVertex>, tip: Vec3, view_projection
     let base_radius = 1.2;
     let top_radius = 3.6;
     let sides = 8;
-    let base_color = [0.96, 0.42, 0.28, 1.0];
+    let base_color = colors::preview_pen_base();
     let top_center = tip + vec3(0.0, 0.0, body_height);
 
     for index in 0..sides {
@@ -444,7 +465,7 @@ fn append_pen(triangle_vertices: &mut Vec<GpuVertex>, tip: Vec3, view_projection
             top_center,
             top_b,
             top_a,
-            [0.84, 0.24, 0.18, 1.0],
+            colors::preview_pen_cap(),
             view_projection,
         );
     }
@@ -502,5 +523,5 @@ fn project_point(point: Vec3, view_projection: Mat4) -> Option<[f32; 2]> {
         return None;
     }
 
-    Some([ndc.x, -ndc.y])
+    Some([ndc.x, ndc.y])
 }

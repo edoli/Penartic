@@ -64,6 +64,7 @@ pub struct MotionSegment {
     pub start: Vec3,
     pub end: Vec3,
     pub kind: MotionKind,
+    pub duration_s: f32,
 }
 
 impl MotionSegment {
@@ -87,6 +88,7 @@ pub struct ToolpathPlan {
     pub printable_area: PrintableArea,
     pub drawing_bounds: Vec2,
     pub segments: Vec<MotionSegment>,
+    pub segment_end_times_s: Vec<f32>,
     pub gcode_lines: Vec<String>,
     pub warnings: Vec<String>,
     pub stats: ToolpathStats,
@@ -95,6 +97,14 @@ pub struct ToolpathPlan {
 impl ToolpathPlan {
     pub fn gcode_text(&self) -> String {
         self.gcode_lines.join("\n")
+    }
+
+    pub fn total_duration_s(&self) -> f32 {
+        self.segment_end_times_s.last().copied().unwrap_or(self.stats.estimated_duration_s).max(0.0)
+    }
+
+    pub fn elapsed_duration_s(&self, progress: f32) -> f32 {
+        progress.clamp(0.0, 1.0) * self.total_duration_s()
     }
 
     pub fn progress_state(&self, progress: f32) -> (usize, Option<MotionSegment>, Vec3) {
@@ -108,27 +118,89 @@ impl ToolpathPlan {
             return (0, None, self.segments[0].start);
         }
 
-        let total = self.segments.len() as f32;
-        let scaled = clamped * total;
-        let finished_count = scaled.floor() as usize;
+        let total_duration_s = self.total_duration_s();
+        if total_duration_s <= f32::EPSILON {
+            let pen = self.segments.last().map(|segment| segment.end).unwrap_or(Vec3::ZERO);
+            return (self.segments.len(), None, pen);
+        }
+
+        let elapsed_s = clamped * total_duration_s;
+        let finished_count =
+            self.segment_end_times_s.partition_point(|end_time| *end_time < elapsed_s);
 
         if finished_count >= self.segments.len() {
             let pen = self.segments.last().map(|segment| segment.end).unwrap_or(Vec3::ZERO);
             return (self.segments.len(), None, pen);
         }
 
-        let fraction = scaled.fract();
         let current = self.segments[finished_count];
-
-        if fraction <= f32::EPSILON {
-            (finished_count, None, current.start)
-        } else {
-            let partial = MotionSegment {
-                start: current.start,
-                end: current.start.lerp(current.end, fraction),
-                kind: current.kind,
-            };
-            (finished_count, Some(partial), partial.end)
+        if current.duration_s <= f32::EPSILON {
+            return (finished_count + 1, None, current.end);
         }
+
+        let segment_start_s =
+            if finished_count == 0 { 0.0 } else { self.segment_end_times_s[finished_count - 1] };
+        if elapsed_s <= segment_start_s + f32::EPSILON {
+            return (finished_count, None, current.start);
+        }
+
+        let fraction = ((elapsed_s - segment_start_s) / current.duration_s).clamp(0.0, 1.0);
+        if fraction >= 1.0 - f32::EPSILON {
+            return (finished_count + 1, None, current.end);
+        }
+
+        let partial = MotionSegment {
+            start: current.start,
+            end: current.start.lerp(current.end, fraction),
+            kind: current.kind,
+            duration_s: current.duration_s * fraction,
+        };
+        (finished_count, Some(partial), partial.end)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::{vec2, vec3};
+
+    use super::*;
+
+    #[test]
+    fn progress_uses_motion_time_instead_of_segment_count() {
+        let plan = ToolpathPlan {
+            source_name: "timing.svg".to_owned(),
+            printable_area: PrintableArea::new(220.0, 220.0),
+            drawing_bounds: vec2(110.0, 0.0),
+            segments: vec![
+                MotionSegment {
+                    start: vec3(0.0, 0.0, 0.0),
+                    end: vec3(100.0, 0.0, 0.0),
+                    kind: MotionKind::Draw,
+                    duration_s: 10.0,
+                },
+                MotionSegment {
+                    start: vec3(100.0, 0.0, 0.0),
+                    end: vec3(110.0, 0.0, 0.0),
+                    kind: MotionKind::Draw,
+                    duration_s: 1.0,
+                },
+            ],
+            segment_end_times_s: vec![10.0, 11.0],
+            gcode_lines: Vec::new(),
+            warnings: Vec::new(),
+            stats: ToolpathStats {
+                drawing_distance_mm: 110.0,
+                travel_distance_mm: 0.0,
+                stroke_count: 1,
+                segment_count: 2,
+                estimated_duration_s: 11.0,
+            },
+        };
+
+        let (finished, partial, pen_position) = plan.progress_state(0.5);
+        assert_eq!(finished, 0);
+        let partial = partial.expect("expected an in-flight segment at 50% of total time");
+        assert!((partial.end.x - 55.0).abs() < 1e-3);
+        assert!((pen_position.x - 55.0).abs() < 1e-3);
     }
 }

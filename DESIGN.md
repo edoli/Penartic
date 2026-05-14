@@ -18,9 +18,9 @@ The product must remain useful even when no device is connected:
 
 1. Start the app without a device.
 2. Set printable width, printable height, draw speed, and Z lift height from the left sidebar.
-3. Load an SVG file.
+3. Load an SVG file through the file picker, drag-and-drop, or a native startup path used for validation.
 4. Convert the SVG into a sampled toolpath and G-code.
-5. Show the completed result immediately in the 3D preview, then scrub backward or replay it with the timeline slider.
+5. Show the completed result immediately in the 3D preview, then scrub backward or replay it with the timeline slider using real motion time.
 6. Copy the generated G-code if needed.
 
 ### 2.2 Connected workflow
@@ -29,7 +29,8 @@ The product must remain useful even when no device is connected:
 2. Connect to the device.
 3. Probe firmware information (`M115`) and configuration (`M503`) on a best-effort basis.
 4. If build volume information is detected, update the printable area and rebuild the toolpath.
-5. Queue the generated G-code to the device.
+5. Use the built-in jog/home controls for XY and Z when manual positioning is needed.
+6. Queue the generated G-code to the device, stop it if needed, and keep invalid actions disabled while the current state is active.
 
 ### 2.3 Motion semantics
 
@@ -49,14 +50,15 @@ The product must remain useful even when no device is connected:
 | `src/plot/model.rs` | Shared settings, motion, and toolpath data structures |
 | `src/platform/device.rs` | Native serial probing and streaming, plus native/web capability split |
 | `src/platform/crash.rs` | Native panic hook and runtime error log persistence |
+| `src/res/colors.rs` | Shared UI and preview color tokens |
 | `src/lib.rs` / `src/main.rs` | Native/web bootstrap and platform-specific startup configuration |
 
 ## 4. Rendering design
 
 ### 4.1 UI layout
 
-- left sidebar: device controls, editable print settings, job stats, warnings, logs
-- central panel: preview title, 3D preview canvas, and a bottom control band reserved for playback buttons plus the timeline slider
+- left sidebar: device controls, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
+- central panel: preview title, 3D preview canvas, and a bottom control band reserved for playback buttons plus a full-width timeline slider
 
 ### 4.2 3D preview
 
@@ -66,6 +68,8 @@ window. The callback draws:
 - the printable bed plane and grid
 - completed draw/travel segments
 - the current pen mesh at the playback position
+- motion progress using elapsed toolpath time rather than raw segment count
+- left drag rotates the camera and right drag pans the view across the bed plane
 
 ### 4.3 WGPU/MSAA rule
 
@@ -87,6 +91,9 @@ updated with the same value to avoid WGPU validation errors.
 - the device controller keeps the app usable when no port is available
 - firmware/build-volume probing is intentionally best-effort because printer responses vary by firmware
 - if device probing fails, the manually configured printable area remains authoritative
+- printing state is tracked explicitly so start/stop/connect/disconnect controls can be enabled only when valid
+- direct jog/home controls send relative-motion commands for XY and Z when no print job is active
+- the serial worker keeps multiple G-code lines in flight so typical planner-based firmware can move more smoothly than a strict one-line-at-a-time stream
 
 ## 7. SVG conversion pipeline
 
@@ -121,6 +128,7 @@ Current non-goals:
 - native validation: `cargo build`, `cargo test`
 - web validation: `cargo build --target wasm32-unknown-unknown`
 - SVG regression validation: load every file under `sample\*.svg` through the test suite
+- native visual validation: launch the app with `sample\sample1.svg`, wait briefly, capture a screenshot, and inspect it for obvious layout or rendering anomalies
 - VS Code launch strategy:
   - Windows native debugging uses `cppvsdbg`
   - macOS/Linux native debugging uses `lldb`
@@ -139,4 +147,4 @@ Current non-goals:
 
 - sample SVG assets used for regression live under `sample\`
 - native crash logs are written to a platform-specific application log directory
-- repo-local VS Code tasks provide build, test, SVG regression, and web build entry points
+- repo-local VS Code tasks provide build, test, SVG regression, web build, and Windows screenshot validation entry points

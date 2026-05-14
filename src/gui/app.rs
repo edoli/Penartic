@@ -6,11 +6,12 @@ use eframe::egui;
 
 use super::viewer::{PreviewRenderer, ViewportState};
 use crate::{
-    platform::device::{ConnectionState, DeviceController},
+    platform::device::{ConnectionState, DeviceController, PrintState},
     plot::{
         gcode,
         model::{PrintableArea, ToolSettings, ToolpathPlan},
     },
+    res::colors,
     svg::toolpath,
 };
 
@@ -20,7 +21,7 @@ use std::sync::mpsc::{self, TryRecvError};
 #[cfg(target_arch = "wasm32")]
 use poll_promise::Promise;
 
-const PREVIEW_PLAYBACK_SECONDS: f32 = 8.0;
+const PREVIEW_CONTROL_BAND_HEIGHT: f32 = 104.0;
 
 pub struct PenarticApp {
     settings: ToolSettings,
@@ -31,6 +32,7 @@ pub struct PenarticApp {
     toolpath_plan: Option<ToolpathPlan>,
     preview_progress: f32,
     preview_playing: bool,
+    jog_step_mm: f32,
     error_message: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
     pending_fallback_fonts: Option<mpsc::Receiver<LoadedFallbackFonts>>,
@@ -51,28 +53,47 @@ struct PickedWebSvg {
     bytes: Vec<u8>,
 }
 
+#[derive(Clone)]
+pub struct StartupSvg {
+    pub file_name: String,
+    pub bytes: Vec<u8>,
+}
+
 impl PenarticApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, preview_msaa_samples: u32) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        preview_msaa_samples: u32,
+        startup_svg: Option<StartupSvg>,
+        startup_error: Option<String>,
+    ) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
 
         let mut device = DeviceController::new();
         device.refresh_ports();
 
-        Self {
+        let mut app = Self {
             settings: ToolSettings::default(),
             device,
             preview_renderer: PreviewRenderer::new(cc, preview_msaa_samples),
             viewport_state: ViewportState::default(),
-            loaded_svg: None,
+            loaded_svg: startup_svg
+                .map(|svg| LoadedSvg { file_name: svg.file_name, bytes: svg.bytes }),
             toolpath_plan: None,
             preview_progress: 0.0,
             preview_playing: false,
-            error_message: None,
+            jog_step_mm: 1.0,
+            error_message: startup_error,
             #[cfg(not(target_arch = "wasm32"))]
             pending_fallback_fonts: fonts::spawn_fallback_font_loader(),
             #[cfg(target_arch = "wasm32")]
             pending_svg_pick: None,
+        };
+
+        if app.loaded_svg.is_some() {
+            app.rebuild_toolpath();
         }
+
+        app
     }
 
     fn pick_svg(&mut self) {
@@ -110,6 +131,55 @@ impl PenarticApp {
     fn load_svg(&mut self, file_name: String, bytes: Vec<u8>) {
         self.loaded_svg = Some(LoadedSvg { file_name, bytes });
         self.rebuild_toolpath();
+    }
+
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped_files = ctx.input(|input| input.raw.dropped_files.clone());
+        if dropped_files.is_empty() {
+            return;
+        }
+
+        match self.load_first_dropped_svg(dropped_files) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.error_message =
+                    Some("드래그 드롭으로는 SVG 파일만 불러올 수 있습니다.".to_owned());
+            }
+            Err(error) => {
+                self.error_message = Some(error);
+            }
+        }
+    }
+
+    fn load_first_dropped_svg(
+        &mut self,
+        dropped_files: Vec<egui::DroppedFile>,
+    ) -> Result<bool, String> {
+        for file in dropped_files {
+            if !is_svg_dropped_file(&file) {
+                continue;
+            }
+
+            let file_name = dropped_file_name(&file);
+            if let Some(bytes) = file.bytes.as_deref() {
+                self.load_svg(file_name, bytes.to_vec());
+                return Ok(true);
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(path) = file.path.as_ref() {
+                let bytes = std::fs::read(path)
+                    .map_err(|error| format!("드롭한 SVG 파일을 읽지 못했습니다: {error}"))?;
+                self.load_svg(file_name, bytes);
+                return Ok(true);
+            }
+
+            return Err(
+                "드롭한 SVG 데이터를 아직 읽을 수 없습니다. 잠시 후 다시 시도하세요.".to_owned()
+            );
+        }
+
+        Ok(false)
     }
 
     fn rebuild_toolpath(&mut self) {
@@ -179,15 +249,110 @@ impl PenarticApp {
     fn handle_fallback_fonts(&mut self, _ctx: &egui::Context) {}
 
     fn update_preview_playback(&mut self, ctx: &egui::Context) {
-        if !self.preview_playing || self.toolpath_plan.is_none() {
+        let Some(plan) = self.toolpath_plan.as_ref() else {
+            return;
+        };
+        if !self.preview_playing {
             return;
         }
 
         let dt = ctx.input(|input| input.stable_dt).min(0.1);
-        self.preview_progress = (self.preview_progress + dt / PREVIEW_PLAYBACK_SECONDS).min(1.0);
+        let total_duration_s = plan.total_duration_s().max(0.1);
+        self.preview_progress = (self.preview_progress + dt / total_duration_s).min(1.0);
 
         if self.preview_progress >= 1.0 {
             self.preview_playing = false;
+        }
+    }
+
+    fn apply_device_action(&mut self, result: Result<(), String>) {
+        match result {
+            Ok(()) => self.error_message = None,
+            Err(error) => self.error_message = Some(error),
+        }
+    }
+
+    fn show_manual_controls(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.heading("수동 제어");
+
+        let can_control = self.device.is_connected() && !self.device.is_job_active();
+        let jog_feed_rate = self.settings.travel_feed_rate();
+
+        ui.columns(2, |columns| {
+            columns[0].label("X/Y");
+            columns[0].separator();
+            egui::Grid::new("xy-jog-grid").spacing(egui::vec2(8.0, 8.0)).show(
+                &mut columns[0],
+                |ui| {
+                    spacer_button_cell(ui);
+                    if control_button(ui, "↑", can_control).clicked() {
+                        let result = self.device.jog_xy(0.0, self.jog_step_mm, jog_feed_rate);
+                        self.apply_device_action(result);
+                    }
+                    spacer_button_cell(ui);
+                    ui.end_row();
+
+                    if control_button(ui, "←", can_control).clicked() {
+                        let result = self.device.jog_xy(-self.jog_step_mm, 0.0, jog_feed_rate);
+                        self.apply_device_action(result);
+                    }
+                    if control_button(ui, "홈", can_control).clicked() {
+                        let result = self.device.home_xy();
+                        self.apply_device_action(result);
+                    }
+                    if control_button(ui, "→", can_control).clicked() {
+                        let result = self.device.jog_xy(self.jog_step_mm, 0.0, jog_feed_rate);
+                        self.apply_device_action(result);
+                    }
+                    ui.end_row();
+
+                    spacer_button_cell(ui);
+                    if control_button(ui, "↓", can_control).clicked() {
+                        let result = self.device.jog_xy(0.0, -self.jog_step_mm, jog_feed_rate);
+                        self.apply_device_action(result);
+                    }
+                    spacer_button_cell(ui);
+                    ui.end_row();
+                },
+            );
+
+            columns[1].label("Z");
+            columns[1].separator();
+            egui::Grid::new("z-jog-grid").spacing(egui::vec2(8.0, 8.0)).show(
+                &mut columns[1],
+                |ui| {
+                    if control_button(ui, "↑", can_control).clicked() {
+                        let result = self.device.jog_z(self.jog_step_mm, jog_feed_rate);
+                        self.apply_device_action(result);
+                    }
+                    ui.end_row();
+
+                    if control_button(ui, "홈", can_control).clicked() {
+                        let result = self.device.home_z();
+                        self.apply_device_action(result);
+                    }
+                    ui.end_row();
+
+                    if control_button(ui, "↓", can_control).clicked() {
+                        let result = self.device.jog_z(-self.jog_step_mm, jog_feed_rate);
+                        self.apply_device_action(result);
+                    }
+                    ui.end_row();
+                },
+            );
+        });
+
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("이동 간격");
+            for step in [0.1_f32, 1.0, 10.0, 100.0] {
+                ui.selectable_value(&mut self.jog_step_mm, step, format_jog_step(step));
+            }
+        });
+
+        if !can_control {
+            ui.small("장치가 연결되어 있고 프린트 중이 아닐 때만 수동 제어를 사용할 수 있습니다.");
         }
     }
 
@@ -202,6 +367,7 @@ impl PenarticApp {
                 if ui.button("SVG 불러오기").clicked() {
                     self.pick_svg();
                 }
+                ui.small("파일 선택이나 드래그 드롭으로 SVG를 불러올 수 있습니다.");
 
                 if let Some(plan) = &self.toolpath_plan {
                     if ui.button("G-code 복사").clicked() {
@@ -213,9 +379,17 @@ impl PenarticApp {
                 ui.heading("디바이스");
 
                 let is_native = self.device.connection_state() != ConnectionState::Unsupported;
+                let status_color = connection_status_color(&self.device);
                 ui.horizontal(|ui| {
                     ui.label("상태");
-                    ui.label(self.device.status_text());
+                    ui.colored_label(status_color, format!("● {}", self.device.status_text()));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("작업");
+                    ui.colored_label(
+                        print_state_color(self.device.print_state()),
+                        self.device.print_state_text(),
+                    );
                 });
 
                 if let Some(firmware) = self.device.firmware_summary() {
@@ -247,27 +421,52 @@ impl PenarticApp {
                             }
                         });
 
+                    let can_connect =
+                        matches!(self.device.connection_state(), ConnectionState::Disconnected)
+                            && !self.device.ports().is_empty();
+                    let can_disconnect = matches!(
+                        self.device.connection_state(),
+                        ConnectionState::Connecting | ConnectionState::Connected
+                    );
                     ui.horizontal(|ui| {
-                        if ui.button("연결").clicked() {
-                            if let Err(error) = self.device.connect() {
-                                self.error_message = Some(error);
-                            }
+                        if ui.add_enabled(can_connect, egui::Button::new("연결")).clicked() {
+                            let result = self.device.connect();
+                            self.apply_device_action(result);
                         }
 
-                        if ui.button("연결 해제").clicked() {
+                        if ui.add_enabled(can_disconnect, egui::Button::new("연결 해제")).clicked()
+                        {
                             self.device.disconnect();
                         }
                     });
 
-                    let can_print = self.toolpath_plan.is_some() && self.device.is_connected();
-                    if ui.add_enabled(can_print, egui::Button::new("프린트 시작")).clicked() {
-                        if let Some(plan) = &self.toolpath_plan {
-                            if let Err(error) = self.device.send_job(&plan.gcode_lines) {
-                                self.error_message = Some(error);
+                    let can_start_print = self.toolpath_plan.is_some()
+                        && self.device.is_connected()
+                        && !self.device.is_job_active();
+                    let can_stop_print = self.device.can_stop_print();
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(can_start_print, egui::Button::new("프린트 시작"))
+                            .clicked()
+                        {
+                            if let Some(plan) = self.toolpath_plan.as_ref() {
+                                let gcode_lines = plan.gcode_lines.clone();
+                                let result = self.device.send_job(&gcode_lines);
+                                self.apply_device_action(result);
                             }
                         }
-                    }
+
+                        if ui
+                            .add_enabled(can_stop_print, egui::Button::new("프린트 정지"))
+                            .clicked()
+                        {
+                            let result = self.device.stop_job();
+                            self.apply_device_action(result);
+                        }
+                    });
                 });
+
+                self.show_manual_controls(ui);
 
                 ui.separator();
                 ui.heading("설정");
@@ -324,7 +523,7 @@ impl PenarticApp {
                     if !plan.warnings.is_empty() {
                         ui.separator();
                         for warning in &plan.warnings {
-                            ui.colored_label(egui::Color32::YELLOW, warning);
+                            ui.colored_label(colors::warning(), warning);
                         }
                     }
                 } else {
@@ -333,11 +532,11 @@ impl PenarticApp {
 
                 if let Some(error) = &self.error_message {
                     ui.separator();
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                    ui.colored_label(colors::error(), error);
                 }
 
                 if let Some(error) = self.device.last_error() {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                    ui.colored_label(colors::error(), error);
                 }
 
                 ui.separator();
@@ -352,10 +551,24 @@ impl PenarticApp {
     }
 
     fn show_central_panel(&mut self, root_ui: &mut egui::Ui) {
+        let timeline_text = self
+            .toolpath_plan
+            .as_ref()
+            .map(|plan| {
+                format!(
+                    "{:.0}% · {:.1}s / {:.1}s",
+                    self.preview_progress * 100.0,
+                    plan.elapsed_duration_s(self.preview_progress),
+                    plan.total_duration_s()
+                )
+            })
+            .unwrap_or_else(|| "0%".to_owned());
+
         egui::CentralPanel::default().show_inside(root_ui, |ui| {
-            egui::Panel::bottom("preview-controls").resizable(false).exact_size(84.0).show_inside(
-                ui,
-                |ui| {
+            egui::Panel::bottom("preview-controls")
+                .resizable(false)
+                .exact_size(PREVIEW_CONTROL_BAND_HEIGHT)
+                .show_inside(ui, |ui| {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let toggle_label =
@@ -384,20 +597,33 @@ impl PenarticApp {
                             self.preview_playing = false;
                         }
 
-                        ui.label(format!("{:.0}%", self.preview_progress * 100.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(timeline_text);
+                        });
                     });
 
-                    let slider = egui::Slider::new(&mut self.preview_progress, 0.0..=1.0)
-                        .show_value(false)
-                        .text("타임라인");
-                    if ui.add_enabled(self.toolpath_plan.is_some(), slider).changed() {
-                        self.preview_playing = false;
-                    }
-                },
-            );
+                    ui.add_space(6.0);
+                    ui.label("타임라인");
+                    ui.scope(|ui| {
+                        ui.spacing_mut().slider_width = ui.available_width();
+                        let current_interact_height = ui.spacing().interact_size.y;
+                        ui.spacing_mut().interact_size.y = current_interact_height.max(28.0);
+                        let slider = egui::Slider::new(&mut self.preview_progress, 0.0..=1.0)
+                            .show_value(false);
+                        let mut changed = false;
+                        ui.add_enabled_ui(self.toolpath_plan.is_some(), |ui| {
+                            changed = ui.add_sized([ui.available_width(), 28.0], slider).changed();
+                        });
+                        if changed {
+                            self.preview_playing = false;
+                        }
+                    });
+                });
 
             ui.heading("3D 미리보기");
-            ui.label("드래그로 회전하고 마우스 휠로 확대/축소할 수 있습니다.");
+            ui.label(
+                "왼쪽 드래그로 회전, 오른쪽 드래그로 이동, 마우스 휠로 확대/축소할 수 있습니다.",
+            );
             ui.add_space(8.0);
             egui::Frame::canvas(ui.style()).show(ui, |ui| {
                 let preview_size = egui::vec2(ui.available_width(), ui.available_height());
@@ -416,6 +642,7 @@ impl PenarticApp {
 
 impl eframe::App for PenarticApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_dropped_files(ctx);
         self.handle_web_file_pick();
         self.handle_fallback_fonts(ctx);
         self.handle_device_updates();
@@ -459,4 +686,74 @@ fn drag_value_row(
             .changed();
     });
     changed
+}
+
+fn is_svg_dropped_file(file: &egui::DroppedFile) -> bool {
+    if file.mime.eq_ignore_ascii_case("image/svg+xml") {
+        return true;
+    }
+
+    if file
+        .path
+        .as_ref()
+        .and_then(|path| path.extension())
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+    {
+        return true;
+    }
+
+    std::path::Path::new(&file.name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+}
+
+fn dropped_file_name(file: &egui::DroppedFile) -> String {
+    file.path
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .or_else(|| (!file.name.trim().is_empty()).then(|| file.name.clone()))
+        .unwrap_or_else(|| "dropped.svg".to_owned())
+}
+
+fn connection_status_color(device: &DeviceController) -> egui::Color32 {
+    if device.last_error().is_some() {
+        colors::error()
+    } else {
+        match device.connection_state() {
+            ConnectionState::Connected => colors::success(),
+            ConnectionState::Connecting => colors::warning(),
+            ConnectionState::Unsupported | ConnectionState::Disconnected => colors::muted_text(),
+        }
+    }
+}
+
+fn print_state_color(print_state: PrintState) -> egui::Color32 {
+    match print_state {
+        PrintState::Idle => colors::muted_text(),
+        PrintState::Printing => colors::success(),
+        PrintState::Stopping => colors::warning(),
+    }
+}
+
+fn control_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
+    ui.add_enabled(enabled, egui::Button::new(label).min_size(egui::vec2(48.0, 44.0)))
+}
+
+fn spacer_button_cell(ui: &mut egui::Ui) {
+    ui.allocate_exact_size(egui::vec2(48.0, 44.0), egui::Sense::hover());
+}
+
+fn format_jog_step(step: f32) -> &'static str {
+    if (step - 0.1).abs() < f32::EPSILON {
+        "0.1"
+    } else if (step - 1.0).abs() < f32::EPSILON {
+        "1"
+    } else if (step - 10.0).abs() < f32::EPSILON {
+        "10"
+    } else {
+        "100"
+    }
 }
