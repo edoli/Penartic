@@ -132,8 +132,9 @@ updated with the same value to avoid WGPU validation errors.
 6. On load, create a one-time centered default placement that interprets SVG coordinate units as millimeters instead of auto-fitting to the printable area.
 7. Reuse the user-controlled SVG placement for later rebuilds instead of auto-rescaling when printable area changes.
 8. Apply placement and dash splitting in IR space.
-9. Reorder placed strokes with a greedy nearest-endpoint pass and reverse individual strokes when
-   their end point is closer than their start point, reducing pen-up travel between SVG paths.
+9. Reorder placed strokes with a KD-tree-backed greedy nearest-endpoint pass and reverse individual
+   strokes when their end point is closer than their start point, reducing pen-up travel between SVG
+   paths without rescanning every remaining path on each placement rebuild.
 10. Optionally replace sharp joins between adjacent primitives by comparing their end/start tangents and inserting a tiny rounded transition using a configurable radius and turn-angle threshold.
 11. Mark drawings that extend beyond the printable area so the UI and preview can warn/highlight them.
 12. Build preview motion segments with explicit travel lifts from the IR plus any generated rounded corners.
