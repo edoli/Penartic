@@ -44,6 +44,7 @@ pub struct PenarticApp {
     preview_progress: f32,
     preview_playing: bool,
     show_travel_moves: bool,
+    show_drawing_bounds: bool,
     jog_step_mm: f32,
     error_message: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -118,6 +119,7 @@ impl PenarticApp {
             preview_progress: 0.0,
             preview_playing: false,
             show_travel_moves: true,
+            show_drawing_bounds: true,
             jog_step_mm: 1.0,
             error_message: startup_error,
             #[cfg(not(target_arch = "wasm32"))]
@@ -341,6 +343,14 @@ impl PenarticApp {
         let plan = self.toolpath_plan.as_ref()?;
         let (_, _, pen_position) = plan.progress_state(self.preview_progress);
         Some(glam::vec2(pen_position.x, pen_position.y))
+    }
+
+    fn move_to_bounds_corner(&mut self, corners: Option<[glam::Vec2; 4]>, index: usize) {
+        let Some(position) = corners.and_then(|corners| corners.get(index).copied()) else {
+            return;
+        };
+        let result = self.device.move_to(position.x, position.y, self.settings.travel_feed_rate());
+        self.apply_device_action(result);
     }
 
     fn show_manual_controls(&mut self, ui: &mut egui::Ui) {
@@ -616,6 +626,66 @@ impl PenarticApp {
                                 }
                             }
                             ui.small("Z 리프트 후 Home하고 첫 번째 그리기 시작 위치로 이동합니다.");
+
+                            let drawing_bounds_corners =
+                                self.toolpath_plan.as_ref().map(drawing_bounds_corners);
+                            let can_move_to_bounds_corner = drawing_bounds_corners.is_some()
+                                && self.device.is_connected()
+                                && !self.device.is_job_active();
+                            ui.label("바운딩 박스 모서리");
+                            egui::Grid::new("bounds-corner-move-grid")
+                                .num_columns(2)
+                                .spacing(egui::vec2(6.0, 4.0))
+                                .show(ui, |ui| {
+                                    if bounds_corner_button(
+                                        ui,
+                                        "좌상",
+                                        drawing_bounds_corners,
+                                        2,
+                                        can_move_to_bounds_corner,
+                                    )
+                                    .clicked()
+                                    {
+                                        self.move_to_bounds_corner(drawing_bounds_corners, 2);
+                                    }
+                                    if bounds_corner_button(
+                                        ui,
+                                        "우상",
+                                        drawing_bounds_corners,
+                                        3,
+                                        can_move_to_bounds_corner,
+                                    )
+                                    .clicked()
+                                    {
+                                        self.move_to_bounds_corner(drawing_bounds_corners, 3);
+                                    }
+                                    ui.end_row();
+
+                                    if bounds_corner_button(
+                                        ui,
+                                        "좌하",
+                                        drawing_bounds_corners,
+                                        0,
+                                        can_move_to_bounds_corner,
+                                    )
+                                    .clicked()
+                                    {
+                                        self.move_to_bounds_corner(drawing_bounds_corners, 0);
+                                    }
+                                    if bounds_corner_button(
+                                        ui,
+                                        "우하",
+                                        drawing_bounds_corners,
+                                        1,
+                                        can_move_to_bounds_corner,
+                                    )
+                                    .clicked()
+                                    {
+                                        self.move_to_bounds_corner(drawing_bounds_corners, 1);
+                                    }
+                                    ui.end_row();
+                                });
+                            ui.small("현재 SVG 바운딩 박스의 각 모서리 XY 좌표로 절대 이동합니다.");
                         });
 
                         self.show_manual_controls(ui);
@@ -845,6 +915,7 @@ impl PenarticApp {
                     self.toolpath_plan.as_ref(),
                     self.preview_progress,
                     self.show_travel_moves,
+                    self.show_drawing_bounds,
                     &mut self.viewport_state,
                 );
                 self.show_preview_controls_overlay(ui, preview_rect, &timeline_text);
@@ -930,6 +1001,7 @@ impl PenarticApp {
                     }
 
                     ui.checkbox(&mut self.show_travel_moves, "펜 리프트 이동 경로 표시");
+                    ui.checkbox(&mut self.show_drawing_bounds, "바운딩 박스 표시");
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(timeline_text);
@@ -1003,6 +1075,32 @@ fn drag_value_row(
             .changed();
     });
     changed
+}
+
+fn drawing_bounds_corners(plan: &ToolpathPlan) -> [glam::Vec2; 4] {
+    let min = plan.drawing_origin;
+    let max = plan.drawing_origin + plan.drawing_bounds;
+    [
+        glam::vec2(min.x, min.y),
+        glam::vec2(max.x, min.y),
+        glam::vec2(min.x, max.y),
+        glam::vec2(max.x, max.y),
+    ]
+}
+
+fn bounds_corner_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    corners: Option<[glam::Vec2; 4]>,
+    index: usize,
+    enabled: bool,
+) -> egui::Response {
+    let tooltip = corners
+        .and_then(|corners| corners.get(index).copied())
+        .map(|corner| format!("{label}: X {:.2}, Y {:.2}", corner.x, corner.y))
+        .unwrap_or_else(|| "SVG를 불러오면 사용할 수 있습니다.".to_owned());
+    ui.add_enabled(enabled, egui::Button::new(label).min_size(egui::vec2(64.0, 28.0)))
+        .on_hover_text(tooltip)
 }
 
 fn is_svg_dropped_file(file: &egui::DroppedFile) -> bool {

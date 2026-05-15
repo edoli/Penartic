@@ -184,6 +184,7 @@ impl PreviewRenderer {
         plan: Option<&ToolpathPlan>,
         progress: f32,
         show_travel_moves: bool,
+        show_drawing_bounds: bool,
         state: &mut ViewportState,
     ) -> egui::Rect {
         let desired = egui::vec2(desired_size.x.max(1.0), desired_size.y.max(1.0));
@@ -218,7 +219,7 @@ impl PreviewRenderer {
         };
 
         let view_projection = view_projection_for(plan, rect.size(), state);
-        let geometry = self.cached_geometry(plan, progress, show_travel_moves);
+        let geometry = self.cached_geometry(plan, progress, show_travel_moves, show_drawing_bounds);
 
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
@@ -236,6 +237,7 @@ impl PreviewRenderer {
         plan: &ToolpathPlan,
         progress: f32,
         show_travel_moves: bool,
+        show_drawing_bounds: bool,
     ) -> Arc<PreviewGeometry> {
         let key = PreviewGeometryKey {
             plan_ptr: plan as *const ToolpathPlan as usize,
@@ -250,6 +252,7 @@ impl PreviewRenderer {
             is_out_of_bounds: plan.is_out_of_bounds,
             progress_bits: progress.to_bits(),
             show_travel_moves,
+            show_drawing_bounds,
         };
 
         let mut cache = self.cache.borrow_mut();
@@ -259,7 +262,12 @@ impl PreviewRenderer {
             }
         }
 
-        let geometry = Arc::new(PreviewGeometry::from_plan(plan, progress, show_travel_moves));
+        let geometry = Arc::new(PreviewGeometry::from_plan(
+            plan,
+            progress,
+            show_travel_moves,
+            show_drawing_bounds,
+        ));
         *cache = Some(PreviewGeometryCache { key, geometry: geometry.clone() });
         geometry
     }
@@ -285,6 +293,7 @@ struct PreviewGeometryKey {
     is_out_of_bounds: bool,
     progress_bits: u32,
     show_travel_moves: bool,
+    show_drawing_bounds: bool,
 }
 
 struct PreviewGeometryCache {
@@ -293,13 +302,23 @@ struct PreviewGeometryCache {
 }
 
 impl PreviewGeometry {
-    fn from_plan(plan: &ToolpathPlan, progress: f32, show_travel_moves: bool) -> Self {
+    fn from_plan(
+        plan: &ToolpathPlan,
+        progress: f32,
+        show_travel_moves: bool,
+        show_drawing_bounds: bool,
+    ) -> Self {
         let mut triangle_vertices = Vec::new();
         let mut line_vertices = Vec::new();
 
         append_bed(&mut triangle_vertices, &mut line_vertices, plan);
-        if plan.is_out_of_bounds {
-            append_out_of_bounds_outline(&mut line_vertices, plan);
+        if show_drawing_bounds {
+            let color = if plan.is_out_of_bounds {
+                colors::preview_overflow()
+            } else {
+                colors::preview_bounds()
+            };
+            append_drawing_bounds_outline(&mut line_vertices, plan, color);
         }
 
         let (finished, partial, pen_position) = plan.progress_state(progress);
@@ -601,7 +620,11 @@ fn append_segment(
     append_line(line_vertices, segment.start, segment.end, color);
 }
 
-fn append_out_of_bounds_outline(line_vertices: &mut Vec<GpuVertex>, plan: &ToolpathPlan) {
+fn append_drawing_bounds_outline(
+    line_vertices: &mut Vec<GpuVertex>,
+    plan: &ToolpathPlan,
+    color: [f32; 4],
+) {
     let z = 0.15;
     let min = vec3(plan.drawing_origin.x, plan.drawing_origin.y, z);
     let max = vec3(
@@ -609,7 +632,6 @@ fn append_out_of_bounds_outline(line_vertices: &mut Vec<GpuVertex>, plan: &Toolp
         plan.drawing_origin.y + plan.drawing_bounds.y,
         z,
     );
-    let color = colors::preview_overflow();
 
     if plan.drawing_bounds.x <= 1e-3 && plan.drawing_bounds.y <= 1e-3 {
         return;

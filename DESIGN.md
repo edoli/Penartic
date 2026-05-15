@@ -32,7 +32,7 @@ The product must remain useful even when no device is connected:
 3. Probe firmware information (`M115`) and configuration (`M503`) on a best-effort basis.
 4. If build volume information is detected, update the printable area and rebuild the toolpath without rewriting the current SVG placement or scale.
 5. Choose whether print start should home XY first or begin directly from the current position; the default is direct-start without XY homing.
-6. Use the built-in jog/home controls for XY and Z when manual positioning is needed, including a helper that raises Z by the configured lift amount, homes XY, and moves to the first drawing start point while lifted.
+6. Use the built-in jog/home controls for XY and Z when manual positioning is needed, including helpers that raise Z by the configured lift amount, home XY, and move to either the first drawing start point or the current timeline preview position while lifted.
 7. Queue the generated G-code to the device, stop it if needed, and keep invalid actions disabled while the current state is active.
 
 ### 2.3 Motion semantics
@@ -50,9 +50,10 @@ The product must remain useful even when no device is connected:
 | `src/gui/app.rs` | Main egui application state, sidebar UI, SVG loading, SVG placement controls, playback controls, and layout wiring |
 | `src/gui/viewer.rs` | Custom WGPU paint callback for the bed, pen mesh, and timeline-aware motion preview |
 | `src/gui/fonts.rs` | Native fallback CJK font discovery, deferred native font loading, and bundled web CJK font registration |
-| `src/svg/ir.rs` | SVG intermediate-representation primitives, curve math, dash splitting, and polyline approximation helpers |
-| `src/svg/toolpath.rs` | Parse SVG with `usvg`, build SVG IR strokes, compute intrinsic bounds, and apply persistent placement transforms |
-| `src/plot/gcode.rs` | Convert SVG IR into preview motion segments, apply optional tangent-based join rounding, and emit linear, G2/G3, and/or G5 G-code |
+| `src/paths/ir.rs` | Generic path intermediate-representation primitives, stroke collection aliases, curve math, dash splitting, and polyline approximation helpers |
+| `src/paths/stroke_processing.rs` | Generic stroke normalization, ordering, joining, and geometric bounds helpers used after parsing |
+| `src/paths/svg_parser.rs` | Parse SVG with `usvg`, sample visible SVG paths into path IR, surface SVG-specific warnings, and apply persistent placement transforms |
+| `src/plot/gcode.rs` | Convert IR into preview motion segments, apply optional tangent-based join rounding, and emit linear, G2/G3, and/or G5 G-code |
 | `src/plot/model.rs` | Shared settings, motion, and toolpath data structures |
 | `src/platform/device.rs` | Native serial probing and streaming, plus native/web capability split |
 | `src/platform/crash.rs` | Native panic hook and runtime error log persistence |
@@ -67,6 +68,7 @@ The product must remain useful even when no device is connected:
 - left sidebar: fixed-width, vertically scrollable device controls, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
 - sidebar action buttons use a slightly taller shared height, paired device/job actions are laid out in evenly sized columns with explicit spacing, the print-start homing toggle sits directly under the print action row, long firmware text stays on one line with hover access to the full value, the upper sidebar controls scroll independently from a left-aligned device log section that fills the remaining sidebar height, advanced G2/G3, G5, and corner-smoothing controls can be toggled from settings, and sidebar content growth must not resize the 3D preview when the window size stays fixed
 - central panel: a full-size 3D preview canvas with a translucent bottom overlay for playback buttons and the full-width timeline slider so controls remain visible in smaller windows
+- the preview overlay can command a connected idle device to move to the current timeline pen position and can toggle lifted travel paths or the placed SVG bounding box
 
 ### 4.2 3D preview
 
@@ -74,10 +76,10 @@ The preview uses an `egui_wgpu::CallbackTrait` paint callback instead of a separ
 window. The callback draws:
 
 - the printable bed plane and grid
-- completed draw/travel segments
+- completed draw segments, plus travel segments when the preview option to show lifted pen moves is enabled
 - the current pen mesh at the playback position
 - motion progress using elapsed toolpath time rather than raw segment count
-- out-of-bounds SVG segments plus the placed SVG bounds when the drawing exceeds the printable area
+- out-of-bounds SVG segments, plus the placed SVG bounding box when the matching preview option is enabled
 - the default camera starts from a front-aligned orientation instead of a rotated diagonal view
 - left drag rotates the camera and right drag pans the view across the bed plane
 - preview vertex buffers may grow when printable area or toolpath density changes and therefore must be resized safely before queue writes
@@ -114,7 +116,7 @@ updated with the same value to avoid WGPU validation errors.
 - printing state is tracked explicitly so start/stop/connect/disconnect controls can be enabled only when valid
 - the UI keeps polling the native serial worker while a device is connected or connecting, so asynchronous probe responses can update settings after the initial click frame
 - direct jog/home controls send synchronized metric movement commands for XY and Z when no print job is active
-- a dedicated first-start-point command raises Z only by the configured lift amount, homes XY, and then moves to the first drawing start point without starting the whole job
+- dedicated positioning commands can move to the first drawing start point, current timeline preview position, or any placed SVG bounding-box corner without starting the whole job
 - the serial worker strips comments before transmission, sends one G-code line per firmware acknowledgement for conservative USB/firmware buffer handling, and never treats read timeouts as acknowledgements
 - web serial streaming follows the same comment stripping, ACK tracking, stop, jog/home, and bounded
   one-line in-flight behavior as the native worker; it requires a browser with Web Serial support, a secure
@@ -126,14 +128,16 @@ updated with the same value to avoid WGPU validation errors.
 
 1. Parse SVG with `usvg`.
 2. Walk visible path nodes.
-3. Convert path segments into SVG IR strokes that preserve line, quadratic, and cubic geometry.
+3. Convert path segments into generic IR strokes that preserve line, quadratic, and cubic geometry.
 4. Capture stroke dash metadata so visible dashed spans can be generated from IR instead of being lost during parsing.
 5. Compute intrinsic SVG bounds.
 6. On load, create a one-time centered default placement that interprets SVG coordinate units as millimeters instead of auto-fitting to the printable area.
 7. Reuse the user-controlled SVG placement for later rebuilds instead of auto-rescaling when printable area changes.
-8. Convert raw SVG coordinates into source drawing space, split dashed strokes once, then reorder
-   strokes with a KD-tree-backed greedy nearest-endpoint pass and reverse individual strokes when
-   their end point is closer than their start point.
+8. Convert raw SVG coordinates into source drawing space, split dashed strokes once, merge IR
+   segments shorter than 0.5 mm into neighboring segments, drop strokes whose resulting length is
+   still below 0.5 mm, then reorder strokes with a KD-tree-backed greedy nearest-endpoint pass and
+   reverse individual strokes when their end point is closer than their start point. After ordering,
+   adjacent strokes whose endpoint gap is 0.5 mm or smaller are joined into one continuous IR stroke.
 9. Apply the current placement to the already ordered IR when SVG position or scale changes, so
    placement rebuilds do not repeat dash splitting or stroke-order optimization.
 10. Optionally replace sharp joins between adjacent primitives by comparing their end/start tangents and inserting a tiny rounded transition using a configurable radius and turn-angle threshold.
