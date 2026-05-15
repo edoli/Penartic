@@ -354,9 +354,6 @@ impl PenarticApp {
     }
 
     fn show_manual_controls(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
-        ui.heading("수동 제어");
-
         let can_control = self.device.is_connected() && !self.device.is_job_active();
         let jog_feed_rate = self.settings.travel_feed_rate();
         let xy_pad_width = CONTROL_BUTTON_WIDTH * 3.0 + CONTROL_GRID_SPACING * 2.0;
@@ -625,7 +622,27 @@ impl PenarticApp {
                                     self.apply_device_action(result);
                                 }
                             }
-                            ui.small("Z 리프트 후 Home하고 첫 번째 그리기 시작 위치로 이동합니다.");
+
+                            let can_move_to_timeline_position = self.current_timeline_position().is_some()
+                                && self.device.is_connected()
+                                && !self.device.is_job_active();
+                            if ui
+                                .add_enabled(
+                                    can_move_to_timeline_position,
+                                    egui::Button::new("현재 위치로 이동"),
+                                )
+                                .clicked()
+                            {
+                                if let Some(position) = self.current_timeline_position() {
+                                    self.preview_playing = false;
+                                    let result = self.device.move_to(
+                                        position.x,
+                                        position.y,
+                                        self.settings.travel_feed_rate(),
+                                    );
+                                    self.apply_device_action(result);
+                                }
+                            }
 
                             let drawing_bounds_corners =
                                 self.toolpath_plan.as_ref().map(drawing_bounds_corners);
@@ -685,7 +702,6 @@ impl PenarticApp {
                                     }
                                     ui.end_row();
                                 });
-                            ui.small("현재 SVG 바운딩 박스의 각 모서리 XY 좌표로 절대 이동합니다.");
                         });
 
                         self.show_manual_controls(ui);
@@ -979,27 +995,6 @@ impl PenarticApp {
                         self.preview_playing = false;
                     }
 
-                    let can_move_to_timeline_position = self.current_timeline_position().is_some()
-                        && self.device.is_connected()
-                        && !self.device.is_job_active();
-                    if ui
-                        .add_enabled(
-                            can_move_to_timeline_position,
-                            egui::Button::new("현재 위치로 이동"),
-                        )
-                        .clicked()
-                    {
-                        if let Some(position) = self.current_timeline_position() {
-                            self.preview_playing = false;
-                            let result = self.device.move_to(
-                                position.x,
-                                position.y,
-                                self.settings.travel_feed_rate(),
-                            );
-                            self.apply_device_action(result);
-                        }
-                    }
-
                     ui.checkbox(&mut self.show_travel_moves, "펜 리프트 이동 경로 표시");
                     ui.checkbox(&mut self.show_drawing_bounds, "바운딩 박스 표시");
 
@@ -1099,7 +1094,7 @@ fn bounds_corner_button(
         .and_then(|corners| corners.get(index).copied())
         .map(|corner| format!("{label}: X {:.2}, Y {:.2}", corner.x, corner.y))
         .unwrap_or_else(|| "SVG를 불러오면 사용할 수 있습니다.".to_owned());
-    ui.add_enabled(enabled, egui::Button::new(label).min_size(egui::vec2(64.0, 28.0)))
+    ui.add_enabled(enabled, egui::Button::new(label).min_size(egui::vec2(48.0, 24.0)))
         .on_hover_text(tooltip)
 }
 
