@@ -10,14 +10,17 @@ const MIN_CUBIC_SUBDIVISIONS: usize = 8;
 const MAX_CUBIC_SUBDIVISIONS: usize = 96;
 const SEGMENT_EPSILON: f32 = 1e-4;
 
+pub type StrokeSegments = Vec<Segment>;
+pub type Strokes = Vec<Stroke>;
+
 #[derive(Debug, Clone)]
-pub struct SvgIrStroke {
-    pub segments: Vec<SvgIrSegment>,
+pub struct Stroke {
+    pub segments: StrokeSegments,
 }
 
-impl SvgIrStroke {
-    pub fn new(segments: Vec<SvgIrSegment>) -> Self {
-        Self { segments }
+impl Stroke {
+    pub fn new(segments: impl Into<StrokeSegments>) -> Self {
+        Self { segments: segments.into() }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -25,19 +28,19 @@ impl SvgIrStroke {
     }
 
     pub fn start_point(&self) -> Option<Vec2> {
-        self.segments.first().map(SvgIrSegment::start_point)
+        self.segments.first().map(Segment::start_point)
     }
 
     pub fn end_point(&self) -> Option<Vec2> {
-        self.segments.last().map(SvgIrSegment::end_point)
+        self.segments.last().map(Segment::end_point)
     }
 
     pub fn reversed(&self) -> Self {
-        Self { segments: self.segments.iter().rev().map(SvgIrSegment::reversed).collect() }
+        Self { segments: self.segments.iter().rev().map(Segment::reversed).collect() }
     }
 
     pub fn approximate_length(&self) -> f32 {
-        self.segments.iter().map(SvgIrSegment::approximate_length).sum()
+        self.segments.iter().map(Segment::approximate_length).sum()
     }
 
     pub fn merge_short_segments(
@@ -49,7 +52,7 @@ impl SvgIrStroke {
             return None;
         }
 
-        let mut merged: Vec<SvgIrSegment> = Vec::with_capacity(self.segments.len());
+        let mut merged: StrokeSegments = Vec::with_capacity(self.segments.len());
         let mut pending_start = None;
 
         for mut segment in self.segments.iter().copied() {
@@ -107,7 +110,7 @@ impl SvgIrStroke {
         }
     }
 
-    pub fn apply_dash_pattern(&self, dash_pattern: &DashPattern) -> Vec<Self> {
+    pub fn apply_dash_pattern(&self, dash_pattern: &DashPattern) -> Strokes {
         if self.segments.is_empty() {
             return Vec::new();
         }
@@ -116,8 +119,8 @@ impl SvgIrStroke {
             return vec![self.clone()];
         };
 
-        let mut dashed_strokes = Vec::new();
-        let mut visible_segments = Vec::new();
+        let mut dashed_strokes: Strokes = Vec::new();
+        let mut visible_segments: StrokeSegments = Vec::new();
 
         for segment in &self.segments {
             let segment_length = segment.approximate_length();
@@ -158,13 +161,13 @@ impl SvgIrStroke {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum SvgIrSegment {
+pub enum Segment {
     Line(LineSegment),
     Quadratic(QuadraticBezierSegment),
     Cubic(CubicBezierSegment),
 }
 
-impl SvgIrSegment {
+impl Segment {
     pub fn line(start: Vec2, end: Vec2) -> Self {
         Self::Line(LineSegment { start, end })
     }
@@ -579,13 +582,13 @@ fn cubic_subdivisions(start: Vec2, control_a: Vec2, control_b: Vec2, end: Vec2) 
         .clamp(MIN_CUBIC_SUBDIVISIONS, MAX_CUBIC_SUBDIVISIONS)
 }
 
-fn arc_length_subdivisions(segment: &SvgIrSegment) -> usize {
+fn arc_length_subdivisions(segment: &Segment) -> usize {
     let preview_steps = match segment {
-        SvgIrSegment::Line(_) => 1,
-        SvgIrSegment::Quadratic(segment) => {
+        Segment::Line(_) => 1,
+        Segment::Quadratic(segment) => {
             quadratic_subdivisions(segment.start, segment.control, segment.end)
         }
-        SvgIrSegment::Cubic(segment) => {
+        Segment::Cubic(segment) => {
             cubic_subdivisions(segment.start, segment.control_a, segment.control_b, segment.end)
         }
     };
@@ -656,7 +659,7 @@ fn point_to_segment_distance_sq(point: Vec2, start: Vec2, end: Vec2) -> f32 {
 }
 
 #[cfg(test)]
-pub fn flatten_stroke_to_polyline(stroke: &SvgIrStroke) -> Vec<Vec2> {
+pub fn flatten_stroke_to_polyline(stroke: &Stroke) -> Vec<Vec2> {
     let Some(first_segment) = stroke.segments.first() else {
         return Vec::new();
     };
@@ -691,7 +694,7 @@ mod tests {
 
     #[test]
     fn dashes_line_stroke_into_visible_substrokes() {
-        let stroke = SvgIrStroke::new(vec![SvgIrSegment::line(vec2(0.0, 0.0), vec2(10.0, 0.0))]);
+        let stroke = Stroke::new(vec![Segment::line(vec2(0.0, 0.0), vec2(10.0, 0.0))]);
         let pattern = DashPattern::new(&[3.0, 2.0], 0.0).unwrap();
 
         let dashed = stroke.apply_dash_pattern(&pattern);
@@ -705,10 +708,10 @@ mod tests {
 
     #[test]
     fn merges_short_segments_into_neighbors() {
-        let stroke = SvgIrStroke::new(vec![
-            SvgIrSegment::line(vec2(0.0, 0.0), vec2(10.0, 0.0)),
-            SvgIrSegment::line(vec2(10.0, 0.0), vec2(10.2, 0.0)),
-            SvgIrSegment::line(vec2(10.2, 0.0), vec2(20.0, 0.0)),
+        let stroke = Stroke::new(vec![
+            Segment::line(vec2(0.0, 0.0), vec2(10.0, 0.0)),
+            Segment::line(vec2(10.0, 0.0), vec2(10.2, 0.0)),
+            Segment::line(vec2(10.2, 0.0), vec2(20.0, 0.0)),
         ]);
 
         let merged = stroke.merge_short_segments(0.5, 0.5).unwrap();
@@ -720,9 +723,9 @@ mod tests {
 
     #[test]
     fn removes_stroke_when_merged_length_is_too_short() {
-        let stroke = SvgIrStroke::new(vec![
-            SvgIrSegment::line(vec2(0.0, 0.0), vec2(0.1, 0.0)),
-            SvgIrSegment::line(vec2(0.1, 0.0), vec2(0.3, 0.0)),
+        let stroke = Stroke::new(vec![
+            Segment::line(vec2(0.0, 0.0), vec2(0.1, 0.0)),
+            Segment::line(vec2(0.1, 0.0), vec2(0.3, 0.0)),
         ]);
 
         assert!(stroke.merge_short_segments(0.5, 0.5).is_none());
@@ -730,9 +733,8 @@ mod tests {
 
     #[test]
     fn appends_stroke_when_gap_is_within_threshold() {
-        let mut stroke =
-            SvgIrStroke::new(vec![SvgIrSegment::line(vec2(0.0, 0.0), vec2(10.0, 0.0))]);
-        let next = SvgIrStroke::new(vec![SvgIrSegment::line(vec2(10.2, 0.0), vec2(20.0, 0.0))]);
+        let mut stroke = Stroke::new(vec![Segment::line(vec2(0.0, 0.0), vec2(10.0, 0.0))]);
+        let next = Stroke::new(vec![Segment::line(vec2(10.2, 0.0), vec2(20.0, 0.0))]);
 
         assert!(stroke.append_if_gap_within(next, 0.5));
         assert_eq!(stroke.segments.len(), 2);
@@ -741,9 +743,8 @@ mod tests {
 
     #[test]
     fn keeps_strokes_separate_when_gap_exceeds_threshold() {
-        let mut stroke =
-            SvgIrStroke::new(vec![SvgIrSegment::line(vec2(0.0, 0.0), vec2(10.0, 0.0))]);
-        let next = SvgIrStroke::new(vec![SvgIrSegment::line(vec2(11.0, 0.0), vec2(20.0, 0.0))]);
+        let mut stroke = Stroke::new(vec![Segment::line(vec2(0.0, 0.0), vec2(10.0, 0.0))]);
+        let next = Stroke::new(vec![Segment::line(vec2(11.0, 0.0), vec2(20.0, 0.0))]);
 
         assert!(!stroke.append_if_gap_within(next, 0.5));
         assert_eq!(stroke.segments.len(), 1);

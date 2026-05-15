@@ -1,8 +1,8 @@
 mod gui;
+mod paths;
 mod platform;
 mod plot;
 mod res;
-mod svg;
 #[cfg(not(target_arch = "wasm32"))]
 mod validation;
 

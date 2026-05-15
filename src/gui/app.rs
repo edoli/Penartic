@@ -8,6 +8,7 @@ use eframe::egui;
 use super::layout::{Size, UiLayoutExt};
 use super::viewer::{PreviewRenderer, ViewportState};
 use crate::{
+    paths,
     platform::device::{ConnectionState, DeviceController, PrintState},
     plot::{
         gcode,
@@ -17,7 +18,6 @@ use crate::{
         },
     },
     res::colors,
-    svg::toolpath,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -54,7 +54,7 @@ pub struct PenarticApp {
 
 #[derive(Clone)]
 struct LoadedSvg {
-    document: toolpath::ParsedSvg,
+    document: paths::ParsedSvg,
 }
 
 #[derive(Clone, Copy)]
@@ -168,7 +168,7 @@ impl PenarticApp {
     fn load_svg(&mut self, file_name: String, bytes: Vec<u8>) {
         self.settings.sanitize();
 
-        match toolpath::parse_svg(file_name, &bytes) {
+        match paths::parse_svg(file_name, &bytes) {
             Ok(document) => {
                 let loaded_svg = LoadedSvg { document };
                 self.svg_placement =
@@ -256,7 +256,7 @@ impl PenarticApp {
         };
         svg_placement.placement.sanitize();
 
-        let prepared = toolpath::prepare_svg(
+        let prepared = paths::prepare_svg(
             &svg.document,
             svg_placement.placement,
             self.settings.printable_area,

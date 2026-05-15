@@ -2,21 +2,20 @@ use glam::{Vec2, vec2};
 use thiserror::Error;
 use usvg::{Node, Options, Tree, tiny_skia_path::PathSegment};
 
-use crate::{
-    plot::model::{PrintableArea, SvgPlacement},
-    svg::ir::{DashPattern, SvgIrSegment, SvgIrStroke},
-};
+use crate::plot::model::{PrintableArea, SvgPlacement};
+
+use super::ir::{DashPattern, Segment, Stroke, StrokeSegments, Strokes};
+use super::stroke_processing::{normalize_strokes, stroke_bounds};
 
 const OUT_OF_BOUNDS_TOLERANCE_MM: f32 = 0.01;
-const KDTREE_STROKE_ORDERING_THRESHOLD: usize = 64;
-const MIN_IR_SEGMENT_LENGTH_MM: f32 = 0.5;
-const MIN_IR_STROKE_LENGTH_MM: f32 = 0.5;
-const MAX_IR_STROKE_JOIN_GAP_MM: f32 = 0.5;
+const MIN_STROKE_SEGMENT_LENGTH_MM: f32 = 0.5;
+const MIN_STROKE_LENGTH_MM: f32 = 0.5;
+const MAX_STROKE_JOIN_GAP_MM: f32 = 0.5;
 
 #[derive(Debug, Clone)]
 pub struct PreparedSvg {
     pub source_name: String,
-    pub strokes: Vec<SvgIrStroke>,
+    pub strokes: Strokes,
     pub warnings: Vec<String>,
     pub drawing_origin: Vec2,
     pub drawing_bounds: Vec2,
@@ -26,14 +25,14 @@ pub struct PreparedSvg {
 #[derive(Debug, Clone)]
 pub struct ParsedSvg {
     pub source_name: String,
-    strokes: Vec<SvgIrStroke>,
+    strokes: Strokes,
     pub warnings: Vec<String>,
     bounds: SourceBounds,
 }
 
 #[derive(Debug, Clone)]
 struct RawStroke {
-    stroke: SvgIrStroke,
+    stroke: Stroke,
     dash_pattern: Option<DashPattern>,
 }
 
@@ -45,7 +44,7 @@ struct SourceBounds {
 }
 
 #[derive(Debug, Error)]
-pub enum SvgToolpathError {
+pub enum SvgParserError {
     #[error("SVG를 읽을 수 없습니다: {0}")]
     Parse(#[from] usvg::Error),
     #[error("SVG 안에서 그릴 수 있는 path를 찾지 못했습니다.")]
@@ -73,7 +72,7 @@ impl ParsedSvg {
 pub fn parse_svg(
     source_name: impl Into<String>,
     bytes: &[u8],
-) -> Result<ParsedSvg, SvgToolpathError> {
+) -> Result<ParsedSvg, SvgParserError> {
     let source_name = source_name.into();
     let tree = Tree::from_data(bytes, &Options::default())?;
     let mut raw_strokes = Vec::new();
@@ -83,10 +82,12 @@ pub fn parse_svg(
 
     raw_strokes.retain(|stroke| !stroke.stroke.is_empty());
     if raw_strokes.is_empty() {
-        return Err(SvgToolpathError::NoPaths);
+        return Err(SvgParserError::NoPaths);
     }
 
-    let (min, max) = bounds(&raw_strokes);
+    let Some((min, max)) = stroke_bounds(raw_strokes.iter().map(|raw| &raw.stroke)) else {
+        return Err(SvgParserError::NoPaths);
+    };
     let source_size = max - min;
     let mut warnings = Vec::new();
     if tree.has_text_nodes() || warning_flags.saw_text {
@@ -100,13 +101,15 @@ pub fn parse_svg(
     }
 
     let bounds = SourceBounds { min, max, size: source_size };
-    let mut strokes = strokes_in_source_drawing_space(&raw_strokes, bounds);
-    strokes = merge_short_stroke_segments(strokes);
+    let strokes = normalize_strokes(
+        strokes_in_source_drawing_space(&raw_strokes, bounds),
+        MIN_STROKE_SEGMENT_LENGTH_MM,
+        MIN_STROKE_LENGTH_MM,
+        MAX_STROKE_JOIN_GAP_MM,
+    );
     if strokes.is_empty() {
-        return Err(SvgToolpathError::NoPaths);
+        return Err(SvgParserError::NoPaths);
     }
-    optimize_stroke_order(&mut strokes);
-    strokes = merge_close_ordered_strokes(strokes);
 
     Ok(ParsedSvg { source_name, strokes, warnings, bounds })
 }
@@ -135,10 +138,7 @@ pub fn prepare_svg(
     }
 }
 
-fn strokes_in_source_drawing_space(
-    raw_strokes: &[RawStroke],
-    bounds: SourceBounds,
-) -> Vec<SvgIrStroke> {
+fn strokes_in_source_drawing_space(raw_strokes: &[RawStroke], bounds: SourceBounds) -> Strokes {
     let map = |point: Vec2| vec2(point.x - bounds.min.x, bounds.max.y - point.y);
     let mut strokes = Vec::new();
 
@@ -152,251 +152,6 @@ fn strokes_in_source_drawing_space(
     }
 
     strokes
-}
-
-fn merge_short_stroke_segments(strokes: Vec<SvgIrStroke>) -> Vec<SvgIrStroke> {
-    strokes
-        .into_iter()
-        .filter_map(|stroke| {
-            stroke.merge_short_segments(MIN_IR_SEGMENT_LENGTH_MM, MIN_IR_STROKE_LENGTH_MM)
-        })
-        .collect()
-}
-
-fn merge_close_ordered_strokes(strokes: Vec<SvgIrStroke>) -> Vec<SvgIrStroke> {
-    let mut merged: Vec<SvgIrStroke> = Vec::with_capacity(strokes.len());
-
-    for stroke in strokes {
-        if let Some(previous) = merged.last_mut() {
-            if previous.append_if_gap_within(stroke.clone(), MAX_IR_STROKE_JOIN_GAP_MM) {
-                continue;
-            }
-        }
-
-        merged.push(stroke);
-    }
-
-    merged
-}
-
-fn optimize_stroke_order(strokes: &mut Vec<SvgIrStroke>) {
-    if strokes.len() <= 1 {
-        optimize_stroke_order_exact(strokes);
-        return;
-    }
-
-    if strokes.len() < KDTREE_STROKE_ORDERING_THRESHOLD {
-        optimize_stroke_order_exact(strokes);
-        return;
-    }
-
-    let Some(endpoint_tree) = StrokeEndpointTree::new(strokes) else {
-        optimize_stroke_order_exact(strokes);
-        return;
-    };
-
-    let mut unordered = std::mem::take(strokes).into_iter().map(Some).collect::<Vec<_>>();
-    let mut active = vec![true; unordered.len()];
-    let mut remaining = unordered.len();
-    let mut ordered = Vec::with_capacity(unordered.len());
-    let mut current = Vec2::ZERO;
-
-    while remaining > 0 {
-        let Some(endpoint) = endpoint_tree.nearest(current, &active) else {
-            break;
-        };
-
-        active[endpoint.stroke_index] = false;
-        remaining -= 1;
-
-        let Some(stroke) = unordered[endpoint.stroke_index].take() else {
-            continue;
-        };
-        let stroke = if endpoint.reverse { stroke.reversed() } else { stroke };
-        if let Some(end) = stroke.end_point() {
-            current = end;
-        }
-        ordered.push(stroke);
-    }
-
-    ordered.extend(unordered.into_iter().flatten());
-    *strokes = ordered;
-}
-
-fn optimize_stroke_order_exact(strokes: &mut Vec<SvgIrStroke>) {
-    let mut unordered = std::mem::take(strokes);
-    let mut ordered = Vec::with_capacity(unordered.len());
-    let mut current = Vec2::ZERO;
-
-    while !unordered.is_empty() {
-        let Some((best_index, reverse)) = nearest_stroke(&unordered, current) else {
-            break;
-        };
-
-        let stroke = unordered.swap_remove(best_index);
-        let stroke = if reverse { stroke.reversed() } else { stroke };
-        if let Some(end) = stroke.end_point() {
-            current = end;
-        }
-        ordered.push(stroke);
-    }
-
-    *strokes = ordered;
-}
-
-#[derive(Clone, Copy)]
-struct StrokeEndpoint {
-    stroke_index: usize,
-    reverse: bool,
-    point: Vec2,
-}
-
-impl StrokeEndpoint {
-    fn new(stroke_index: usize, reverse: bool, point: Vec2) -> Self {
-        Self { stroke_index, reverse, point }
-    }
-}
-
-struct StrokeEndpointTree {
-    endpoints: Vec<StrokeEndpoint>,
-    nodes: Vec<StrokeEndpointNode>,
-    root: Option<usize>,
-}
-
-struct StrokeEndpointNode {
-    endpoint_index: usize,
-    axis: usize,
-    left: Option<usize>,
-    right: Option<usize>,
-}
-
-impl StrokeEndpointTree {
-    fn new(strokes: &[SvgIrStroke]) -> Option<Self> {
-        let mut endpoints = Vec::with_capacity(strokes.len() * 2);
-        for (stroke_index, stroke) in strokes.iter().enumerate() {
-            endpoints.push(StrokeEndpoint::new(stroke_index, false, stroke.start_point()?));
-            endpoints.push(StrokeEndpoint::new(stroke_index, true, stroke.end_point()?));
-        }
-
-        let mut tree = Self { endpoints, nodes: Vec::with_capacity(strokes.len() * 2), root: None };
-        let mut endpoint_indices = (0..tree.endpoints.len()).collect::<Vec<_>>();
-        tree.root = tree.build(&mut endpoint_indices, 0);
-        Some(tree)
-    }
-
-    fn build(&mut self, endpoint_indices: &mut [usize], depth: usize) -> Option<usize> {
-        if endpoint_indices.is_empty() {
-            return None;
-        }
-
-        let axis = depth % 2;
-        endpoint_indices.sort_unstable_by(|left, right| {
-            self.endpoints[*left]
-                .coordinate(axis)
-                .total_cmp(&self.endpoints[*right].coordinate(axis))
-                .then_with(|| left.cmp(right))
-        });
-
-        let mid = endpoint_indices.len() / 2;
-        let (left_indices, pivot_and_right) = endpoint_indices.split_at_mut(mid);
-        let (pivot, right_indices) = pivot_and_right.split_at_mut(1);
-        let node_index = self.nodes.len();
-        self.nodes.push(StrokeEndpointNode {
-            endpoint_index: pivot[0],
-            axis,
-            left: None,
-            right: None,
-        });
-
-        let left = self.build(left_indices, depth + 1);
-        let right = self.build(right_indices, depth + 1);
-        self.nodes[node_index].left = left;
-        self.nodes[node_index].right = right;
-        Some(node_index)
-    }
-
-    fn nearest(&self, current: Vec2, active: &[bool]) -> Option<StrokeEndpoint> {
-        let mut best = None;
-        self.nearest_in_node(self.root?, current, active, &mut best);
-        best.map(|(endpoint_index, _)| self.endpoints[endpoint_index])
-    }
-
-    fn nearest_in_node(
-        &self,
-        node_index: usize,
-        current: Vec2,
-        active: &[bool],
-        best: &mut Option<(usize, f32)>,
-    ) {
-        let node = &self.nodes[node_index];
-        let endpoint = self.endpoints[node.endpoint_index];
-        if active.get(endpoint.stroke_index).copied().unwrap_or(false) {
-            let distance = current.distance_squared(endpoint.point);
-            if should_replace_nearest(*best, node.endpoint_index, distance) {
-                *best = Some((node.endpoint_index, distance));
-            }
-        }
-
-        let current_coordinate = coordinate(current, node.axis);
-        let split_coordinate = endpoint.coordinate(node.axis);
-        let (near, far) = if current_coordinate <= split_coordinate {
-            (node.left, node.right)
-        } else {
-            (node.right, node.left)
-        };
-
-        if let Some(near) = near {
-            self.nearest_in_node(near, current, active, best);
-        }
-
-        let axis_distance = current_coordinate - split_coordinate;
-        if best.is_none_or(|(_, best_distance)| axis_distance * axis_distance <= best_distance) {
-            if let Some(far) = far {
-                self.nearest_in_node(far, current, active, best);
-            }
-        }
-    }
-}
-
-impl StrokeEndpoint {
-    fn coordinate(self, axis: usize) -> f32 {
-        coordinate(self.point, axis)
-    }
-}
-
-fn coordinate(point: Vec2, axis: usize) -> f32 {
-    if axis == 0 { point.x } else { point.y }
-}
-
-fn should_replace_nearest(
-    best: Option<(usize, f32)>,
-    candidate_index: usize,
-    candidate_distance: f32,
-) -> bool {
-    let Some((best_index, best_distance)) = best else {
-        return true;
-    };
-    candidate_distance < best_distance
-        || (candidate_distance == best_distance && candidate_index < best_index)
-}
-
-fn nearest_stroke(strokes: &[SvgIrStroke], current: Vec2) -> Option<(usize, bool)> {
-    strokes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, stroke)| {
-            let start = stroke.start_point()?;
-            let end = stroke.end_point()?;
-            let start_distance = current.distance_squared(start);
-            let end_distance = current.distance_squared(end);
-            if end_distance < start_distance {
-                Some((index, true, end_distance))
-            } else {
-                Some((index, false, start_distance))
-            }
-        })
-        .min_by(|left, right| left.2.total_cmp(&right.2))
-        .map(|(index, reverse, _)| (index, reverse))
 }
 
 fn collect_group(group: &usvg::Group, strokes: &mut Vec<RawStroke>, flags: &mut WarningFlags) {
@@ -418,18 +173,18 @@ fn collect_group(group: &usvg::Group, strokes: &mut Vec<RawStroke>, flags: &mut 
     }
 }
 
-fn sample_path(path: &usvg::Path) -> Vec<SvgIrStroke> {
-    let mut strokes = Vec::new();
-    let mut current_segments = Vec::new();
+fn sample_path(path: &usvg::Path) -> Strokes {
+    let mut strokes: Strokes = Vec::new();
+    let mut current_segments: StrokeSegments = Vec::new();
     let transform = path.abs_transform();
 
     let mut current = Vec2::ZERO;
     let mut move_to = Vec2::ZERO;
     let mut has_current = false;
 
-    let flush = |buffer: &mut Vec<SvgIrSegment>, output: &mut Vec<SvgIrStroke>| {
+    let flush = |buffer: &mut StrokeSegments, output: &mut Strokes| {
         if !buffer.is_empty() {
-            output.push(SvgIrStroke::new(std::mem::take(buffer)));
+            output.push(Stroke::new(std::mem::take(buffer)));
         }
     };
 
@@ -448,7 +203,7 @@ fn sample_path(path: &usvg::Path) -> Vec<SvgIrStroke> {
                 }
                 let mapped = map_point(transform, point);
                 if current.distance_squared(mapped) > 1e-6 {
-                    current_segments.push(SvgIrSegment::line(current, mapped));
+                    current_segments.push(Segment::line(current, mapped));
                     current = mapped;
                 }
             }
@@ -459,7 +214,7 @@ fn sample_path(path: &usvg::Path) -> Vec<SvgIrStroke> {
                 let control = map_point(transform, control);
                 let end = map_point(transform, point);
                 if current.distance_squared(end) > 1e-6 {
-                    current_segments.push(SvgIrSegment::quadratic(current, control, end));
+                    current_segments.push(Segment::quadratic(current, control, end));
                     current = end;
                 }
             }
@@ -471,14 +226,14 @@ fn sample_path(path: &usvg::Path) -> Vec<SvgIrStroke> {
                 let control_b = map_point(transform, control_b);
                 let end = map_point(transform, point);
                 if current.distance_squared(end) > 1e-6 {
-                    current_segments.push(SvgIrSegment::cubic(current, control_a, control_b, end));
+                    current_segments.push(Segment::cubic(current, control_a, control_b, end));
                     current = end;
                 }
             }
             PathSegment::Close => {
                 if has_current {
                     if current.distance_squared(move_to) > 1e-6 {
-                        current_segments.push(SvgIrSegment::line(current, move_to));
+                        current_segments.push(Segment::line(current, move_to));
                     }
                     flush(&mut current_segments, &mut strokes);
                     current = move_to;
@@ -490,36 +245,6 @@ fn sample_path(path: &usvg::Path) -> Vec<SvgIrStroke> {
 
     flush(&mut current_segments, &mut strokes);
     strokes
-}
-
-fn bounds(strokes: &[RawStroke]) -> (Vec2, Vec2) {
-    let mut min = vec2(f32::INFINITY, f32::INFINITY);
-    let mut max = vec2(f32::NEG_INFINITY, f32::NEG_INFINITY);
-
-    for stroke in strokes {
-        for segment in &stroke.stroke.segments {
-            for point in segment_points_for_bounds(*segment) {
-                min.x = min.x.min(point.x);
-                min.y = min.y.min(point.y);
-                max.x = max.x.max(point.x);
-                max.y = max.y.max(point.y);
-            }
-        }
-    }
-
-    (min, max)
-}
-
-fn segment_points_for_bounds(segment: SvgIrSegment) -> [Vec2; 4] {
-    match segment {
-        SvgIrSegment::Line(segment) => [segment.start, segment.end, segment.end, segment.end],
-        SvgIrSegment::Quadratic(segment) => {
-            [segment.start, segment.control, segment.end, segment.end]
-        }
-        SvgIrSegment::Cubic(segment) => {
-            [segment.start, segment.control_a, segment.control_b, segment.end]
-        }
-    }
 }
 
 fn drawing_out_of_bounds(origin: Vec2, size: Vec2, printable_area: PrintableArea) -> bool {
@@ -538,7 +263,7 @@ fn map_point(transform: usvg::Transform, point: usvg::tiny_skia_path::Point) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::svg::ir::{SvgIrSegment, flatten_stroke_to_polyline};
+    use crate::paths::{Segment, flatten_stroke_to_polyline};
     use std::{fs, path::Path};
 
     #[test]
@@ -616,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_cubic_segments_in_svg_ir() {
+    fn preserves_cubic_segments_in_ir() {
         let svg = br#"
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
                 <path d="M 0 0 C 2 10, 8 10, 10 0" />
@@ -628,7 +353,7 @@ mod tests {
         let prepared =
             prepare_svg(&parsed, parsed.centered_native_placement(printable_area), printable_area);
 
-        assert!(matches!(prepared.strokes[0].segments[0], SvgIrSegment::Cubic(_)));
+        assert!(matches!(prepared.strokes[0].segments[0], Segment::Cubic(_)));
     }
 
     #[test]
@@ -759,23 +484,6 @@ mod tests {
 
         assert_eq!(polyline[0], vec2(5.0, 0.0));
         assert_eq!(polyline[1], vec2(15.0, 0.0));
-    }
-
-    #[test]
-    fn kdtree_ordering_reverses_stroke_when_its_end_is_closer() {
-        let mut strokes =
-            vec![SvgIrStroke::new(vec![SvgIrSegment::line(vec2(100.0, 0.0), vec2(1.0, 0.0))])];
-        for index in 0..KDTREE_STROKE_ORDERING_THRESHOLD {
-            let x = 200.0 + index as f32 * 10.0;
-            strokes
-                .push(SvgIrStroke::new(vec![SvgIrSegment::line(vec2(x, 0.0), vec2(x + 1.0, 0.0))]));
-        }
-
-        optimize_stroke_order(&mut strokes);
-        let polyline = flatten_stroke_to_polyline(&strokes[0]);
-
-        assert_eq!(polyline[0], vec2(1.0, 0.0));
-        assert_eq!(polyline[1], vec2(100.0, 0.0));
     }
 
     #[test]

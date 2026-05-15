@@ -3,13 +3,10 @@ use std::f32::consts::TAU;
 use glam::{Vec2, vec2, vec3};
 
 use crate::{
+    paths::{CubicBezierSegment, PreparedSvg, Segment, Stroke},
     plot::model::{
         CurveOutputMode, MotionKind, MotionSegment, PrintStartMode, ToolSettings, ToolpathPlan,
         ToolpathStats,
-    },
-    svg::{
-        ir::{CubicBezierSegment, SvgIrSegment, SvgIrStroke},
-        toolpath::PreparedSvg,
     },
 };
 
@@ -25,42 +22,42 @@ const MIN_DETECTABLE_ARC_SWEEP_RAD: f32 = 0.05;
 
 #[derive(Debug, Clone, Copy)]
 enum DrawPrimitive {
-    Ir(SvgIrSegment),
+    Path(Segment),
     Arc(ArcSegment),
 }
 
 impl DrawPrimitive {
     fn start_point(self) -> Vec2 {
         match self {
-            Self::Ir(segment) => segment.start_point(),
+            Self::Path(segment) => segment.start_point(),
             Self::Arc(segment) => segment.start,
         }
     }
 
     fn end_point(self) -> Vec2 {
         match self {
-            Self::Ir(segment) => segment.end_point(),
+            Self::Path(segment) => segment.end_point(),
             Self::Arc(segment) => segment.end,
         }
     }
 
     fn approximate_length(self) -> f32 {
         match self {
-            Self::Ir(segment) => segment.approximate_length(),
+            Self::Path(segment) => segment.approximate_length(),
             Self::Arc(segment) => segment.approximate_length(),
         }
     }
 
     fn flatten_points(self) -> Vec<Vec2> {
         match self {
-            Self::Ir(segment) => segment.flatten_points(),
+            Self::Path(segment) => segment.flatten_points(),
             Self::Arc(segment) => segment.flatten_points(),
         }
     }
 
     fn to_cubic_bezier(self) -> Option<CubicBezierSegment> {
         match self {
-            Self::Ir(segment) => segment.to_cubic_bezier(),
+            Self::Path(segment) => segment.to_cubic_bezier(),
             Self::Arc(_) => None,
         }
     }
@@ -68,7 +65,7 @@ impl DrawPrimitive {
     fn detected_arc(self) -> Option<ArcSegment> {
         match self {
             Self::Arc(segment) => Some(segment),
-            Self::Ir(_) => None,
+            Self::Path(_) => None,
         }
     }
 
@@ -79,8 +76,8 @@ impl DrawPrimitive {
         total_length: f32,
     ) -> Option<Self> {
         match self {
-            Self::Ir(segment) => {
-                segment.slice_by_arc_length(start_length, end_length, total_length).map(Self::Ir)
+            Self::Path(segment) => {
+                segment.slice_by_arc_length(start_length, end_length, total_length).map(Self::Path)
             }
             Self::Arc(segment) => {
                 segment.slice_by_arc_length(start_length, end_length, total_length).map(Self::Arc)
@@ -94,7 +91,7 @@ impl DrawPrimitive {
         total_length: f32,
     ) -> (Vec2, Vec2) {
         match self {
-            Self::Ir(segment) => {
+            Self::Path(segment) => {
                 segment.point_and_tangent_at_arc_length(target_length, total_length)
             }
             Self::Arc(segment) => {
@@ -355,12 +352,12 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
     }
 }
 
-fn build_draw_primitives(stroke: &SvgIrStroke, settings: &ToolSettings) -> Vec<DrawPrimitive> {
+fn build_draw_primitives(stroke: &Stroke, settings: &ToolSettings) -> Vec<DrawPrimitive> {
     let base_primitives = stroke
         .segments
         .iter()
         .copied()
-        .map(DrawPrimitive::Ir)
+        .map(DrawPrimitive::Path)
         .filter(|primitive| primitive.approximate_length() > CORNER_EPSILON)
         .collect::<Vec<_>>();
 
@@ -555,7 +552,7 @@ fn build_transition_primitive(
     }
 
     build_tangent_cubic_transition(start_point, start_tangent, end_point, end_tangent)
-        .map(DrawPrimitive::Ir)
+        .map(DrawPrimitive::Path)
 }
 
 fn build_tangent_rounding_arc(
@@ -614,7 +611,7 @@ fn build_tangent_cubic_transition(
     start_tangent: Vec2,
     end_point: Vec2,
     end_tangent: Vec2,
-) -> Option<SvgIrSegment> {
+) -> Option<Segment> {
     let chord = end_point - start_point;
     let chord_length = chord.length();
     if chord_length <= CORNER_EPSILON {
@@ -624,7 +621,7 @@ fn build_tangent_cubic_transition(
     let control_length = (chord_length / 3.0).max(CORNER_EPSILON);
     let control_a = start_point + start_tangent * control_length;
     let control_b = end_point - end_tangent * control_length;
-    Some(SvgIrSegment::cubic(start_point, control_a, control_b, end_point))
+    Some(Segment::cubic(start_point, control_a, control_b, end_point))
 }
 
 fn signed_sweep_between(start_vector: Vec2, end_vector: Vec2, clockwise: bool) -> f32 {
@@ -894,10 +891,7 @@ mod tests {
     fn line_prepared_svg() -> PreparedSvg {
         PreparedSvg {
             source_name: "shape.svg".to_owned(),
-            strokes: vec![SvgIrStroke::new(vec![SvgIrSegment::line(
-                vec2(10.0, 10.0),
-                vec2(40.0, 10.0),
-            )])],
+            strokes: vec![Stroke::new(vec![Segment::line(vec2(10.0, 10.0), vec2(40.0, 10.0))])],
             warnings: Vec::new(),
             drawing_origin: vec2(10.0, 10.0),
             drawing_bounds: vec2(30.0, 0.0),
@@ -908,9 +902,9 @@ mod tests {
     fn right_angle_prepared_svg() -> PreparedSvg {
         PreparedSvg {
             source_name: "corner.svg".to_owned(),
-            strokes: vec![SvgIrStroke::new(vec![
-                SvgIrSegment::line(vec2(0.0, 0.0), vec2(10.0, 0.0)),
-                SvgIrSegment::line(vec2(10.0, 0.0), vec2(10.0, 10.0)),
+            strokes: vec![Stroke::new(vec![
+                Segment::line(vec2(0.0, 0.0), vec2(10.0, 0.0)),
+                Segment::line(vec2(10.0, 0.0), vec2(10.0, 10.0)),
             ])],
             warnings: Vec::new(),
             drawing_origin: vec2(0.0, 0.0),
@@ -982,7 +976,7 @@ mod tests {
     fn emits_g5_for_curve_segments_when_enabled() {
         let prepared = PreparedSvg {
             source_name: "curve.svg".to_owned(),
-            strokes: vec![SvgIrStroke::new(vec![SvgIrSegment::quadratic(
+            strokes: vec![Stroke::new(vec![Segment::quadratic(
                 vec2(0.0, 0.0),
                 vec2(5.0, 10.0),
                 vec2(10.0, 0.0),
@@ -1034,9 +1028,9 @@ mod tests {
     fn smooths_curve_to_line_join_based_on_endpoint_tangents() {
         let prepared = PreparedSvg {
             source_name: "curve-line.svg".to_owned(),
-            strokes: vec![SvgIrStroke::new(vec![
-                SvgIrSegment::quadratic(vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(10.0, 10.0)),
-                SvgIrSegment::line(vec2(10.0, 10.0), vec2(20.0, 10.0)),
+            strokes: vec![Stroke::new(vec![
+                Segment::quadratic(vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(10.0, 10.0)),
+                Segment::line(vec2(10.0, 10.0), vec2(20.0, 10.0)),
             ])],
             warnings: Vec::new(),
             drawing_origin: vec2(0.0, 0.0),
@@ -1085,9 +1079,9 @@ mod tests {
     fn omits_redundant_feed_rate_from_consecutive_draw_moves() {
         let prepared = PreparedSvg {
             source_name: "shape.svg".to_owned(),
-            strokes: vec![SvgIrStroke::new(vec![
-                SvgIrSegment::line(vec2(0.0, 0.0), vec2(10.0, 0.0)),
-                SvgIrSegment::line(vec2(10.0, 0.0), vec2(20.0, 0.0)),
+            strokes: vec![Stroke::new(vec![
+                Segment::line(vec2(0.0, 0.0), vec2(10.0, 0.0)),
+                Segment::line(vec2(10.0, 0.0), vec2(20.0, 0.0)),
             ])],
             warnings: Vec::new(),
             drawing_origin: vec2(0.0, 0.0),
