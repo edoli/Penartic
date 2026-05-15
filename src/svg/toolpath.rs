@@ -9,6 +9,9 @@ use crate::{
 
 const OUT_OF_BOUNDS_TOLERANCE_MM: f32 = 0.01;
 const KDTREE_STROKE_ORDERING_THRESHOLD: usize = 64;
+const MIN_IR_SEGMENT_LENGTH_MM: f32 = 0.5;
+const MIN_IR_STROKE_LENGTH_MM: f32 = 0.5;
+const MAX_IR_STROKE_JOIN_GAP_MM: f32 = 0.5;
 
 #[derive(Debug, Clone)]
 pub struct PreparedSvg {
@@ -98,8 +101,12 @@ pub fn parse_svg(
 
     let bounds = SourceBounds { min, max, size: source_size };
     let mut strokes = strokes_in_source_drawing_space(&raw_strokes, bounds);
-    strokes.retain(|stroke| !stroke.is_empty());
+    strokes = merge_short_stroke_segments(strokes);
+    if strokes.is_empty() {
+        return Err(SvgToolpathError::NoPaths);
+    }
     optimize_stroke_order(&mut strokes);
+    strokes = merge_close_ordered_strokes(strokes);
 
     Ok(ParsedSvg { source_name, strokes, warnings, bounds })
 }
@@ -145,6 +152,31 @@ fn strokes_in_source_drawing_space(
     }
 
     strokes
+}
+
+fn merge_short_stroke_segments(strokes: Vec<SvgIrStroke>) -> Vec<SvgIrStroke> {
+    strokes
+        .into_iter()
+        .filter_map(|stroke| {
+            stroke.merge_short_segments(MIN_IR_SEGMENT_LENGTH_MM, MIN_IR_STROKE_LENGTH_MM)
+        })
+        .collect()
+}
+
+fn merge_close_ordered_strokes(strokes: Vec<SvgIrStroke>) -> Vec<SvgIrStroke> {
+    let mut merged: Vec<SvgIrStroke> = Vec::with_capacity(strokes.len());
+
+    for stroke in strokes {
+        if let Some(previous) = merged.last_mut() {
+            if previous.append_if_gap_within(stroke.clone(), MAX_IR_STROKE_JOIN_GAP_MM) {
+                continue;
+            }
+        }
+
+        merged.push(stroke);
+    }
+
+    merged
 }
 
 fn optimize_stroke_order(strokes: &mut Vec<SvgIrStroke>) {
@@ -619,6 +651,68 @@ mod tests {
         assert!((first.last().unwrap().x - 58.0).abs() < 0.05);
         assert!((second.first().unwrap().x - 60.0).abs() < 0.05);
         assert!((second.last().unwrap().x - 64.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn merges_short_svg_segments_before_reordering() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 1">
+                <path d="M 0 0 L 10 0 L 10.2 0 L 20 0" />
+            </svg>
+        "#;
+
+        let parsed = parse_svg("short-segment.svg", svg).unwrap();
+
+        assert_eq!(parsed.strokes.len(), 1);
+        assert_eq!(parsed.strokes[0].segments.len(), 2);
+        assert_eq!(parsed.strokes[0].segments[0].end_point(), vec2(10.2, 0.0));
+    }
+
+    #[test]
+    fn removes_tiny_svg_strokes_before_reordering() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 1">
+                <path d="M 0 0 L 0.1 0 L 0.2 0" />
+                <path d="M 10 0 L 20 0" />
+            </svg>
+        "#;
+
+        let parsed = parse_svg("tiny-stroke.svg", svg).unwrap();
+
+        assert_eq!(parsed.strokes.len(), 1);
+        assert_eq!(parsed.strokes[0].start_point(), Some(vec2(10.0, 0.0)));
+        assert_eq!(parsed.strokes[0].end_point(), Some(vec2(20.0, 0.0)));
+    }
+
+    #[test]
+    fn merges_ordered_strokes_when_endpoint_gap_is_short() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 1">
+                <path d="M 0 0 L 10 0" />
+                <path d="M 10.2 0 L 20 0" />
+            </svg>
+        "#;
+
+        let parsed = parse_svg("short-gap.svg", svg).unwrap();
+
+        assert_eq!(parsed.strokes.len(), 1);
+        assert_eq!(parsed.strokes[0].segments.len(), 2);
+        assert_eq!(parsed.strokes[0].segments[1].start_point(), vec2(10.0, 0.0));
+        assert_eq!(parsed.strokes[0].end_point(), Some(vec2(20.0, 0.0)));
+    }
+
+    #[test]
+    fn keeps_ordered_strokes_separate_when_endpoint_gap_is_long() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 1">
+                <path d="M 0 0 L 10 0" />
+                <path d="M 11 0 L 20 0" />
+            </svg>
+        "#;
+
+        let parsed = parse_svg("long-gap.svg", svg).unwrap();
+
+        assert_eq!(parsed.strokes.len(), 2);
     }
 
     #[test]

@@ -36,6 +36,66 @@ impl SvgIrStroke {
         Self { segments: self.segments.iter().rev().map(SvgIrSegment::reversed).collect() }
     }
 
+    pub fn approximate_length(&self) -> f32 {
+        self.segments.iter().map(SvgIrSegment::approximate_length).sum()
+    }
+
+    pub fn merge_short_segments(
+        &self,
+        min_segment_length: f32,
+        min_stroke_length: f32,
+    ) -> Option<Self> {
+        if self.segments.is_empty() {
+            return None;
+        }
+
+        let mut merged: Vec<SvgIrSegment> = Vec::with_capacity(self.segments.len());
+        let mut pending_start = None;
+
+        for mut segment in self.segments.iter().copied() {
+            if let Some(start) = pending_start.take() {
+                segment = segment.with_start_point(start);
+            }
+
+            if segment.approximate_length() < min_segment_length {
+                if let Some(previous) = merged.last_mut() {
+                    *previous = previous.with_end_point(segment.end_point());
+                } else {
+                    pending_start = Some(segment.start_point());
+                }
+                continue;
+            }
+
+            merged.push(segment);
+        }
+
+        let merged = Self::new(merged);
+        if merged.approximate_length() < min_stroke_length {
+            return None;
+        }
+
+        Some(merged)
+    }
+
+    pub fn append_if_gap_within(&mut self, mut next: Self, max_gap: f32) -> bool {
+        let Some(end) = self.end_point() else {
+            return false;
+        };
+        let Some(start) = next.start_point() else {
+            return false;
+        };
+
+        if end.distance_squared(start) > max_gap * max_gap {
+            return false;
+        }
+
+        if let Some(first) = next.segments.first_mut() {
+            *first = first.with_start_point(end);
+        }
+        self.segments.extend(next.segments);
+        true
+    }
+
     pub fn transformed(&self, map: impl Fn(Vec2) -> Vec2 + Copy) -> Self {
         Self {
             segments: self
@@ -156,6 +216,26 @@ impl SvgIrSegment {
             }
             Self::Cubic(segment) => {
                 Self::cubic(segment.end, segment.control_b, segment.control_a, segment.start)
+            }
+        }
+    }
+
+    fn with_start_point(&self, start: Vec2) -> Self {
+        match self {
+            Self::Line(segment) => Self::line(start, segment.end),
+            Self::Quadratic(segment) => Self::quadratic(start, segment.control, segment.end),
+            Self::Cubic(segment) => {
+                Self::cubic(start, segment.control_a, segment.control_b, segment.end)
+            }
+        }
+    }
+
+    fn with_end_point(&self, end: Vec2) -> Self {
+        match self {
+            Self::Line(segment) => Self::line(segment.start, end),
+            Self::Quadratic(segment) => Self::quadratic(segment.start, segment.control, end),
+            Self::Cubic(segment) => {
+                Self::cubic(segment.start, segment.control_a, segment.control_b, end)
             }
         }
     }
@@ -621,5 +701,51 @@ mod tests {
         assert_eq!(dashed[0].end_point(), Some(vec2(3.0, 0.0)));
         assert_eq!(dashed[1].start_point(), Some(vec2(5.0, 0.0)));
         assert_eq!(dashed[1].end_point(), Some(vec2(8.0, 0.0)));
+    }
+
+    #[test]
+    fn merges_short_segments_into_neighbors() {
+        let stroke = SvgIrStroke::new(vec![
+            SvgIrSegment::line(vec2(0.0, 0.0), vec2(10.0, 0.0)),
+            SvgIrSegment::line(vec2(10.0, 0.0), vec2(10.2, 0.0)),
+            SvgIrSegment::line(vec2(10.2, 0.0), vec2(20.0, 0.0)),
+        ]);
+
+        let merged = stroke.merge_short_segments(0.5, 0.5).unwrap();
+
+        assert_eq!(merged.segments.len(), 2);
+        assert_eq!(merged.segments[0].end_point(), vec2(10.2, 0.0));
+        assert_eq!(merged.segments[1].start_point(), vec2(10.2, 0.0));
+    }
+
+    #[test]
+    fn removes_stroke_when_merged_length_is_too_short() {
+        let stroke = SvgIrStroke::new(vec![
+            SvgIrSegment::line(vec2(0.0, 0.0), vec2(0.1, 0.0)),
+            SvgIrSegment::line(vec2(0.1, 0.0), vec2(0.3, 0.0)),
+        ]);
+
+        assert!(stroke.merge_short_segments(0.5, 0.5).is_none());
+    }
+
+    #[test]
+    fn appends_stroke_when_gap_is_within_threshold() {
+        let mut stroke =
+            SvgIrStroke::new(vec![SvgIrSegment::line(vec2(0.0, 0.0), vec2(10.0, 0.0))]);
+        let next = SvgIrStroke::new(vec![SvgIrSegment::line(vec2(10.2, 0.0), vec2(20.0, 0.0))]);
+
+        assert!(stroke.append_if_gap_within(next, 0.5));
+        assert_eq!(stroke.segments.len(), 2);
+        assert_eq!(stroke.segments[1].start_point(), vec2(10.0, 0.0));
+    }
+
+    #[test]
+    fn keeps_strokes_separate_when_gap_exceeds_threshold() {
+        let mut stroke =
+            SvgIrStroke::new(vec![SvgIrSegment::line(vec2(0.0, 0.0), vec2(10.0, 0.0))]);
+        let next = SvgIrStroke::new(vec![SvgIrSegment::line(vec2(11.0, 0.0), vec2(20.0, 0.0))]);
+
+        assert!(!stroke.append_if_gap_within(next, 0.5));
+        assert_eq!(stroke.segments.len(), 1);
     }
 }
