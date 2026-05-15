@@ -97,6 +97,7 @@ updated with the same value to avoid WGPU validation errors.
 ## 5. Fonts and localization
 
 - the UI supports English and Korean, defaults to English, persists the selected language through eframe storage on native and web builds, and sources localized strings from `src/res/lang/english.rs` and `src/res/lang/korean.rs`
+- language persistence relies on `eframe`'s `persistence` feature, which maps to native app storage on desktop builds and browser local storage on web builds
 - Korean mode still needs CJK-capable fallback fonts for the UI and warning text
 - native builds asynchronously scan platform font locations and an optional `fallback_font.ttf`
   next to the executable
