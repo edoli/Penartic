@@ -11,6 +11,9 @@ permissions:
   pages: write
   id-token: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 concurrency:
   group: github-pages
   cancel-in-progress: false
@@ -26,6 +29,11 @@ jobs:
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libudev-dev
 
       - name: Add WebAssembly target
         run: rustup target add wasm32-unknown-unknown
