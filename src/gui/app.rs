@@ -337,6 +337,12 @@ impl PenarticApp {
         }
     }
 
+    fn current_timeline_position(&self) -> Option<glam::Vec2> {
+        let plan = self.toolpath_plan.as_ref()?;
+        let (_, _, pen_position) = plan.progress_state(self.preview_progress);
+        Some(glam::vec2(pen_position.x, pen_position.y))
+    }
+
     fn show_manual_controls(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         ui.heading("수동 제어");
@@ -900,6 +906,27 @@ impl PenarticApp {
                     {
                         self.preview_progress = 0.0;
                         self.preview_playing = false;
+                    }
+
+                    let can_move_to_timeline_position = self.current_timeline_position().is_some()
+                        && self.device.is_connected()
+                        && !self.device.is_job_active();
+                    if ui
+                        .add_enabled(
+                            can_move_to_timeline_position,
+                            egui::Button::new("현재 위치로 이동"),
+                        )
+                        .clicked()
+                    {
+                        if let Some(position) = self.current_timeline_position() {
+                            self.preview_playing = false;
+                            let result = self.device.move_to(
+                                position.x,
+                                position.y,
+                                self.settings.travel_feed_rate(),
+                            );
+                            self.apply_device_action(result);
+                        }
                     }
 
                     ui.checkbox(&mut self.show_travel_moves, "펜 리프트 이동 경로 표시");

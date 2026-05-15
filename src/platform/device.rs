@@ -442,6 +442,14 @@ impl DeviceController {
         )
     }
 
+    pub fn move_to(&mut self, x_mm: f32, y_mm: f32, feed_rate_mm_min: f32) -> Result<(), String> {
+        let command = build_absolute_xy_move_command(x_mm, y_mm, feed_rate_mm_min);
+        self.queue_manual_commands(
+            "절대 좌표로 이동 명령을 전송했습니다.",
+            vec!["G21".to_owned(), "M400".to_owned(), "G90".to_owned(), command, "M400".to_owned()],
+        )
+    }
+
     pub fn tick(&mut self) -> Option<PrintableArea> {
         #[cfg(target_arch = "wasm32")]
         {
