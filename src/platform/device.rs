@@ -1,6 +1,9 @@
 use std::{collections::VecDeque, time::Duration};
 
-use crate::plot::model::PrintableArea;
+use crate::{
+    plot::model::PrintableArea,
+    res::lang::{Language, Strings},
+};
 
 #[cfg(target_arch = "wasm32")]
 use {
@@ -36,6 +39,7 @@ pub enum PrintState {
 }
 
 pub struct DeviceController {
+    language: Language,
     available_ports: Vec<String>,
     selected_port: Option<String>,
     connection_state: ConnectionState,
@@ -51,9 +55,14 @@ pub struct DeviceController {
 }
 
 impl DeviceController {
-    pub fn new() -> Self {
+    fn text(&self) -> &'static Strings {
+        self.language.strings()
+    }
+
+    pub fn new(language: Language) -> Self {
         #[allow(unused_mut)]
         let mut controller = Self {
+            language,
             available_ports: Vec::new(),
             selected_port: None,
             connection_state: ConnectionState::Disconnected,
@@ -71,18 +80,48 @@ impl DeviceController {
         #[cfg(target_arch = "wasm32")]
         {
             if web_serial_api().is_some() {
-                controller.selected_port = Some("브라우저에서 포트 선택".to_owned());
-                controller.available_ports.push("브라우저에서 포트 선택".to_owned());
-                controller.push_log("Web Serial API로 장치 연결을 사용할 수 있습니다.");
+                controller.selected_port =
+                    Some(browser_port_selection_label(controller.language).to_owned());
+                controller
+                    .available_ports
+                    .push(browser_port_selection_label(controller.language).to_owned());
+                controller.push_log(controller.text().web_serial_available);
             } else {
                 controller.connection_state = ConnectionState::Unsupported;
-                controller.push_log(
-                    "이 브라우저는 Web Serial API를 지원하지 않습니다. Chrome/Edge의 HTTPS 또는 localhost에서 실행하세요.",
-                );
+                controller.push_log(web_serial_unsupported_message(controller.language));
             }
         }
 
         controller
+    }
+
+    pub fn set_language(&mut self, language: Language) {
+        #[cfg(target_arch = "wasm32")]
+        let previous = self.language;
+        self.language = language;
+
+        #[cfg(target_arch = "wasm32")]
+        self.update_web_port_labels(previous);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn update_web_port_labels(&mut self, previous: Language) {
+        relabel_port_entry(
+            &mut self.selected_port,
+            previous,
+            self.language,
+            browser_port_selection_label,
+        );
+        relabel_port_entry(
+            &mut self.selected_port,
+            previous,
+            self.language,
+            web_serial_device_label,
+        );
+        for port in &mut self.available_ports {
+            relabel_port_value(port, previous, self.language, browser_port_selection_label);
+            relabel_port_value(port, previous, self.language, web_serial_device_label);
+        }
     }
 
     pub fn refresh_ports(&mut self) {
@@ -95,9 +134,9 @@ impl DeviceController {
                 return;
             }
 
-            self.selected_port = Some("브라우저에서 포트 선택".to_owned());
-            self.available_ports.push("브라우저에서 포트 선택".to_owned());
-            self.push_log("연결 버튼을 누르면 브라우저에서 Web Serial 포트를 선택합니다.");
+            self.selected_port = Some(browser_port_selection_label(self.language).to_owned());
+            self.available_ports.push(browser_port_selection_label(self.language).to_owned());
+            self.push_log(self.text().web_serial_choose_port_hint);
             return;
         }
 
@@ -108,16 +147,13 @@ impl DeviceController {
                 if self.selected_port.is_none() {
                     self.selected_port = self.available_ports.first().cloned();
                 }
-                self.push_log(format!(
-                    "시리얼 포트 {}개를 찾았습니다.",
-                    self.available_ports.len()
-                ));
+                self.push_log(self.text().found_serial_ports(self.available_ports.len()));
                 self.last_error = None;
             }
             Err(error) => {
                 self.available_ports.clear();
                 self.last_error = Some(error.to_string());
-                self.push_log(format!("포트 목록을 읽지 못했습니다: {error}"));
+                self.push_log(self.text().failed_to_read_port_list(error));
             }
         }
     }
@@ -139,13 +175,14 @@ impl DeviceController {
     }
 
     pub fn status_text(&self) -> String {
+        let text = self.text();
         match self.connection_state {
-            ConnectionState::Unsupported => "Web preview only".to_owned(),
-            ConnectionState::Disconnected => "연결 안됨".to_owned(),
-            ConnectionState::Connecting => "연결 중…".to_owned(),
+            ConnectionState::Unsupported => text.web_preview_only.to_owned(),
+            ConnectionState::Disconnected => text.disconnected.to_owned(),
+            ConnectionState::Connecting => text.connecting.to_owned(),
             ConnectionState::Connected => match &self.selected_port {
-                Some(port) => format!("연결됨: {port}"),
-                None => "연결됨".to_owned(),
+                Some(port) => text.connected_status(port),
+                None => text.connected.to_owned(),
             },
         }
     }
@@ -155,10 +192,11 @@ impl DeviceController {
     }
 
     pub fn print_state_text(&self) -> &'static str {
+        let text = self.text();
         match self.print_state {
-            PrintState::Idle => "대기 중",
-            PrintState::Printing => "프린트 중",
-            PrintState::Stopping => "정지 요청됨",
+            PrintState::Idle => text.idle,
+            PrintState::Printing => text.printing,
+            PrintState::Stopping => text.stopping,
         }
     }
 
@@ -219,22 +257,19 @@ impl DeviceController {
         {
             if web_serial_api().is_none() {
                 self.connection_state = ConnectionState::Unsupported;
-                return Err(
-                    "이 브라우저는 Web Serial API를 지원하지 않습니다. Chrome/Edge의 HTTPS 또는 localhost에서 실행하세요."
-                        .to_owned(),
-                );
+                return Err(web_serial_unsupported_message(self.language).to_owned());
             }
 
             self.disconnect();
-            let worker = WebWorker::spawn();
+            let worker = WebWorker::spawn(self.language);
             self.worker = Some(worker);
             self.connection_state = ConnectionState::Connecting;
             self.print_state = PrintState::Idle;
             self.last_error = None;
             self.firmware_summary = None;
             self.detected_area = None;
-            self.selected_port = Some("Web Serial 장치".to_owned());
-            self.push_log("브라우저 포트 선택 창을 엽니다.");
+            self.selected_port = Some(web_serial_device_label(self.language).to_owned());
+            self.push_log(self.text().opening_browser_port_picker);
             Ok(())
         }
 
@@ -244,11 +279,11 @@ impl DeviceController {
                 .selected_port
                 .clone()
                 .or_else(|| self.available_ports.first().cloned())
-                .ok_or_else(|| "먼저 연결할 시리얼 포트를 선택하세요.".to_owned())?;
+                .ok_or_else(|| self.text().select_serial_port_before_connecting.to_owned())?;
 
             self.disconnect();
 
-            let (worker, command_tx) = NativeWorker::spawn(port_name.clone())?;
+            let (worker, command_tx) = NativeWorker::spawn(port_name.clone(), self.language)?;
             self.worker = Some(worker);
             self.connection_state = ConnectionState::Connecting;
             self.print_state = PrintState::Idle;
@@ -256,7 +291,7 @@ impl DeviceController {
             self.firmware_summary = None;
             self.detected_area = None;
             self.selected_port = Some(port_name.clone());
-            self.push_log(format!("{port_name} 에 연결을 시도합니다."));
+            self.push_log(self.text().trying_to_connect(&port_name));
 
             if command_tx
                 .send(WorkerCommand::QueueManual(vec![
@@ -268,7 +303,7 @@ impl DeviceController {
             {
                 self.worker = None;
                 self.connection_state = ConnectionState::Disconnected;
-                return Err("장치 초기 프로브를 시작하지 못했습니다.".to_owned());
+                return Err(self.text().failed_to_start_initial_probe.to_owned());
             }
 
             Ok(())
@@ -281,13 +316,13 @@ impl DeviceController {
             worker.queue_command(WorkerCommand::Disconnect);
             self.connection_state = ConnectionState::Disconnected;
             self.print_state = PrintState::Idle;
-            self.push_log("장치 연결을 종료했습니다.");
+            self.push_log(self.text().closed_device_connection);
         }
 
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(worker) = self.worker.take() {
             let _ = worker.command_tx.send(WorkerCommand::Disconnect);
-            self.push_log("장치 연결을 종료했습니다.");
+            self.push_log(self.text().closed_device_connection);
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -301,33 +336,33 @@ impl DeviceController {
         #[cfg(target_arch = "wasm32")]
         {
             if self.is_job_active() {
-                return Err("이미 프린트가 진행 중입니다.".to_owned());
+                return Err(self.text().print_already_in_progress.to_owned());
             }
 
             let worker =
-                self.worker.as_ref().ok_or_else(|| "먼저 장치를 연결하세요.".to_owned())?;
+                self.worker.as_ref().ok_or_else(|| self.text().connect_device_first.to_owned())?;
             worker.queue_command(WorkerCommand::QueueJob(gcode_lines.to_vec()));
             self.print_state = PrintState::Printing;
-            self.push_log(format!("G-code {}줄을 장치로 전송 큐에 올렸습니다.", gcode_lines.len()));
+            self.push_log(self.text().queued_gcode_lines(gcode_lines.len()));
             Ok(())
         }
 
         #[cfg(not(target_arch = "wasm32"))]
         {
             if self.is_job_active() {
-                return Err("이미 프린트가 진행 중입니다.".to_owned());
+                return Err(self.text().print_already_in_progress.to_owned());
             }
 
             let worker =
-                self.worker.as_ref().ok_or_else(|| "먼저 장치를 연결하세요.".to_owned())?;
+                self.worker.as_ref().ok_or_else(|| self.text().connect_device_first.to_owned())?;
 
             worker
                 .command_tx
                 .send(WorkerCommand::QueueJob(gcode_lines.to_vec()))
-                .map_err(|_| "장치 작업 큐에 G-code를 전달하지 못했습니다.".to_owned())?;
+                .map_err(|_| self.text().failed_to_queue_gcode_to_device.to_owned())?;
 
             self.print_state = PrintState::Printing;
-            self.push_log(format!("G-code {}줄을 장치로 전송 큐에 올렸습니다.", gcode_lines.len()));
+            self.push_log(self.text().queued_gcode_lines(gcode_lines.len()));
             Ok(())
         }
     }
@@ -336,32 +371,32 @@ impl DeviceController {
         #[cfg(target_arch = "wasm32")]
         {
             if !self.can_stop_print() {
-                return Err("현재 중지할 프린트 작업이 없습니다.".to_owned());
+                return Err(self.text().no_active_print_job.to_owned());
             }
 
             let worker =
-                self.worker.as_ref().ok_or_else(|| "먼저 장치를 연결하세요.".to_owned())?;
+                self.worker.as_ref().ok_or_else(|| self.text().connect_device_first.to_owned())?;
             worker.queue_command(WorkerCommand::CancelJob);
             self.print_state = PrintState::Stopping;
-            self.push_log("프린트 중지를 요청했습니다. 장치가 지원하면 즉시 정지합니다.");
+            self.push_log(self.text().requested_print_stop);
             Ok(())
         }
 
         #[cfg(not(target_arch = "wasm32"))]
         {
             if !self.can_stop_print() {
-                return Err("현재 중지할 프린트 작업이 없습니다.".to_owned());
+                return Err(self.text().no_active_print_job.to_owned());
             }
 
             let worker =
-                self.worker.as_ref().ok_or_else(|| "먼저 장치를 연결하세요.".to_owned())?;
+                self.worker.as_ref().ok_or_else(|| self.text().connect_device_first.to_owned())?;
             worker
                 .command_tx
                 .send(WorkerCommand::CancelJob)
-                .map_err(|_| "프린트 중지 명령을 전달하지 못했습니다.".to_owned())?;
+                .map_err(|_| self.text().failed_to_send_stop_command.to_owned())?;
 
             self.print_state = PrintState::Stopping;
-            self.push_log("프린트 중지를 요청했습니다. 장치가 지원하면 즉시 정지합니다.");
+            self.push_log(self.text().requested_print_stop);
             Ok(())
         }
     }
@@ -373,9 +408,9 @@ impl DeviceController {
         feed_rate_mm_min: f32,
     ) -> Result<(), String> {
         let command = build_relative_move_command(delta_x_mm, delta_y_mm, 0.0, feed_rate_mm_min)
-            .ok_or_else(|| "이동할 축이 없습니다.".to_owned())?;
+            .ok_or_else(|| self.text().no_axis_to_move.to_owned())?;
         self.queue_manual_commands(
-            "수동 X/Y 이동 명령을 전송했습니다.",
+            self.text().sent_manual_xy_move,
             vec![
                 "G21".to_owned(),
                 "M400".to_owned(),
@@ -389,9 +424,9 @@ impl DeviceController {
 
     pub fn jog_z(&mut self, delta_z_mm: f32, feed_rate_mm_min: f32) -> Result<(), String> {
         let command = build_relative_move_command(0.0, 0.0, delta_z_mm, feed_rate_mm_min)
-            .ok_or_else(|| "이동할 축이 없습니다.".to_owned())?;
+            .ok_or_else(|| self.text().no_axis_to_move.to_owned())?;
         self.queue_manual_commands(
-            "수동 Z 이동 명령을 전송했습니다.",
+            self.text().sent_manual_z_move,
             vec![
                 "G21".to_owned(),
                 "M400".to_owned(),
@@ -405,14 +440,14 @@ impl DeviceController {
 
     pub fn home_xy(&mut self) -> Result<(), String> {
         self.queue_manual_commands(
-            "XY 홈 이동 명령을 전송했습니다.",
+            self.text().sent_xy_home,
             vec!["G21".to_owned(), "M400".to_owned(), "G28 X Y".to_owned()],
         )
     }
 
     pub fn home_z(&mut self) -> Result<(), String> {
         self.queue_manual_commands(
-            "Z 홈 이동 명령을 전송했습니다.",
+            self.text().sent_z_home,
             vec!["G21".to_owned(), "M400".to_owned(), "G28 Z".to_owned()],
         )
     }
@@ -425,9 +460,9 @@ impl DeviceController {
         feed_rate_mm_min: f32,
     ) -> Result<(), String> {
         let lift_command = build_relative_move_command(0.0, 0.0, lift_height_mm, feed_rate_mm_min)
-            .ok_or_else(|| "Z 리프트 이동 거리가 없습니다.".to_owned())?;
+            .ok_or_else(|| self.text().no_z_lift_distance.to_owned())?;
         self.queue_manual_commands(
-            "첫 그리기 시작 위치 이동 명령을 전송했습니다.",
+            self.text().sent_move_to_first_start,
             vec![
                 "G21".to_owned(),
                 "M400".to_owned(),
@@ -445,7 +480,7 @@ impl DeviceController {
     pub fn move_to(&mut self, x_mm: f32, y_mm: f32, feed_rate_mm_min: f32) -> Result<(), String> {
         let command = build_absolute_xy_move_command(x_mm, y_mm, feed_rate_mm_min);
         self.queue_manual_commands(
-            "절대 좌표로 이동 명령을 전송했습니다.",
+            self.text().sent_absolute_move,
             vec!["G21".to_owned(), "M400".to_owned(), "G90".to_owned(), command, "M400".to_owned()],
         )
     }
@@ -465,10 +500,20 @@ impl DeviceController {
             for event in events {
                 match event {
                     WorkerEvent::PortOpened => {
-                        self.push_log("시리얼 포트를 열었습니다. 펌웨어 응답을 기다립니다.");
+                        self.push_log(self.text().opened_serial_port_waiting_firmware);
                     }
                     WorkerEvent::Connected => {
                         self.connection_state = ConnectionState::Connected;
+                    }
+                    WorkerEvent::ReadyTimeout => {
+                        self.last_error = Some(ready_timeout_message(self.language).to_owned());
+                        self.connection_state = ConnectionState::Disconnected;
+                        self.print_state = PrintState::Idle;
+                        self.push_log(
+                            self.text().device_error(ready_timeout_message(self.language)),
+                        );
+                        self.worker = None;
+                        break;
                     }
                     WorkerEvent::Line(line) => {
                         if let Some(firmware) = parse_firmware(&line) {
@@ -484,17 +529,17 @@ impl DeviceController {
                         self.last_error = Some(message.clone());
                         self.connection_state = ConnectionState::Disconnected;
                         self.print_state = PrintState::Idle;
-                        self.push_log(format!("장치 오류: {message}"));
+                        self.push_log(self.text().device_error(&message));
                         self.worker = None;
                         break;
                     }
                     WorkerEvent::JobCompleted => {
                         self.print_state = PrintState::Idle;
-                        self.push_log("프린트가 완료되었습니다.");
+                        self.push_log(self.text().printing_completed);
                     }
                     WorkerEvent::JobCancelled => {
                         self.print_state = PrintState::Idle;
-                        self.push_log("프린트가 중지되었습니다.");
+                        self.push_log(self.text().printing_stopped);
                     }
                     WorkerEvent::Disconnected => {
                         self.connection_state = ConnectionState::Disconnected;
@@ -526,10 +571,20 @@ impl DeviceController {
             for event in events {
                 match event {
                     WorkerEvent::PortOpened => {
-                        self.push_log("시리얼 포트를 열었습니다. 펌웨어 응답을 기다립니다.");
+                        self.push_log(self.text().opened_serial_port_waiting_firmware);
                     }
                     WorkerEvent::Connected => {
                         self.connection_state = ConnectionState::Connected;
+                    }
+                    WorkerEvent::ReadyTimeout => {
+                        self.last_error = Some(ready_timeout_message(self.language).to_owned());
+                        self.connection_state = ConnectionState::Disconnected;
+                        self.print_state = PrintState::Idle;
+                        self.push_log(
+                            self.text().device_error(ready_timeout_message(self.language)),
+                        );
+                        self.worker = None;
+                        break;
                     }
                     WorkerEvent::Line(line) => {
                         if let Some(firmware) = parse_firmware(&line) {
@@ -547,17 +602,17 @@ impl DeviceController {
                         self.last_error = Some(message.clone());
                         self.connection_state = ConnectionState::Disconnected;
                         self.print_state = PrintState::Idle;
-                        self.push_log(format!("장치 오류: {message}"));
+                        self.push_log(self.text().device_error(&message));
                         self.worker = None;
                         break;
                     }
                     WorkerEvent::JobCompleted => {
                         self.print_state = PrintState::Idle;
-                        self.push_log("프린트가 완료되었습니다.");
+                        self.push_log(self.text().printing_completed);
                     }
                     WorkerEvent::JobCancelled => {
                         self.print_state = PrintState::Idle;
-                        self.push_log("프린트가 중지되었습니다.");
+                        self.push_log(self.text().printing_stopped);
                     }
                     WorkerEvent::Disconnected => {
                         self.connection_state = ConnectionState::Disconnected;
@@ -587,11 +642,11 @@ impl DeviceController {
         #[cfg(target_arch = "wasm32")]
         {
             if self.is_job_active() {
-                return Err("프린트 중에는 수동 제어를 사용할 수 없습니다.".to_owned());
+                return Err(self.text().manual_control_unavailable_while_printing.to_owned());
             }
 
             let worker =
-                self.worker.as_ref().ok_or_else(|| "먼저 장치를 연결하세요.".to_owned())?;
+                self.worker.as_ref().ok_or_else(|| self.text().connect_device_first.to_owned())?;
             worker.queue_command(WorkerCommand::QueueManual(commands));
             self.push_log(log_line);
             Ok(())
@@ -600,15 +655,15 @@ impl DeviceController {
         #[cfg(not(target_arch = "wasm32"))]
         {
             if self.is_job_active() {
-                return Err("프린트 중에는 수동 제어를 사용할 수 없습니다.".to_owned());
+                return Err(self.text().manual_control_unavailable_while_printing.to_owned());
             }
 
             let worker =
-                self.worker.as_ref().ok_or_else(|| "먼저 장치를 연결하세요.".to_owned())?;
+                self.worker.as_ref().ok_or_else(|| self.text().connect_device_first.to_owned())?;
             worker
                 .command_tx
                 .send(WorkerCommand::QueueManual(commands))
-                .map_err(|_| "수동 제어 명령을 전달하지 못했습니다.".to_owned())?;
+                .map_err(|_| self.text().failed_to_send_manual_control_command.to_owned())?;
             self.push_log(log_line);
             Ok(())
         }
@@ -623,14 +678,17 @@ struct NativeWorker {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeWorker {
-    fn spawn(port_name: String) -> Result<(Self, std::sync::mpsc::Sender<WorkerCommand>), String> {
+    fn spawn(
+        port_name: String,
+        language: Language,
+    ) -> Result<(Self, std::sync::mpsc::Sender<WorkerCommand>), String> {
         let (command_tx, command_rx) = std::sync::mpsc::channel();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let thread_command_tx = command_tx.clone();
 
         std::thread::Builder::new()
             .name(format!("penartic-serial-{port_name}"))
-            .spawn(move || run_worker(port_name, command_rx, event_tx))
+            .spawn(move || run_worker(port_name, command_rx, event_tx, language))
             .map_err(|error| error.to_string())?;
 
         Ok((Self { command_tx: command_tx.clone(), event_rx }, thread_command_tx))
@@ -647,6 +705,7 @@ enum WorkerCommand {
 enum WorkerEvent {
     PortOpened,
     Connected,
+    ReadyTimeout,
     Line(String),
     JobCompleted,
     JobCancelled,
@@ -659,6 +718,7 @@ fn run_worker(
     port_name: String,
     command_rx: std::sync::mpsc::Receiver<WorkerCommand>,
     event_tx: std::sync::mpsc::Sender<WorkerEvent>,
+    language: Language,
 ) {
     use std::io::Read as _;
     use std::time::Instant;
@@ -744,7 +804,8 @@ fn run_worker(
                 }
 
                 if now.duration_since(ready_started_at) >= READY_TIMEOUT {
-                    return Err("펌웨어가 준비 응답을 보내지 않았습니다.".to_owned());
+                    event_tx.send(WorkerEvent::ReadyTimeout).map_err(|error| error.to_string())?;
+                    return Ok(());
                 }
             }
 
@@ -815,7 +876,7 @@ fn run_worker(
                             }
                         }
 
-                        let line = annotate_busy_line(line, in_flight_lines.front());
+                        let line = annotate_busy_line(line, in_flight_lines.front(), language);
                         event_tx
                             .send(WorkerEvent::Line(line))
                             .map_err(|error| error.to_string())?;
@@ -861,13 +922,18 @@ fn is_busy_line(line: &str) -> bool {
     lower.contains("busy:") || lower.starts_with("echo:busy")
 }
 
-fn annotate_busy_line(line: String, waiting_line: Option<&QueuedLine>) -> String {
+fn annotate_busy_line(
+    line: String,
+    waiting_line: Option<&QueuedLine>,
+    language: Language,
+) -> String {
+    let text = language.strings();
     if !is_busy_line(&line) {
         return line;
     }
 
     match waiting_line {
-        Some(waiting) => format!("{line} (대기 중 명령: {})", waiting.line),
+        Some(waiting) => text.busy_waiting_command(&line, &waiting.line),
         None => line,
     }
 }
@@ -880,6 +946,49 @@ fn clean_gcode_lines(lines: Vec<String>) -> Vec<String> {
             (!command.is_empty()).then(|| command.to_owned())
         })
         .collect()
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn browser_port_selection_label(language: Language) -> &'static str {
+    language.strings().select_port_in_browser
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn web_serial_device_label(language: Language) -> &'static str {
+    language.strings().web_serial_device
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn web_serial_unsupported_message(language: Language) -> &'static str {
+    language.strings().web_serial_unsupported
+}
+
+fn ready_timeout_message(language: Language) -> &'static str {
+    language.strings().firmware_ready_timeout
+}
+
+#[cfg(target_arch = "wasm32")]
+fn relabel_port_entry(
+    entry: &mut Option<String>,
+    previous: Language,
+    next: Language,
+    label: fn(Language) -> &'static str,
+) {
+    if let Some(value) = entry.as_mut() {
+        relabel_port_value(value, previous, next, label);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn relabel_port_value(
+    value: &mut String,
+    previous: Language,
+    next: Language,
+    label: fn(Language) -> &'static str,
+) {
+    if *value == label(previous) || *value == label(next) {
+        *value = label(next).to_owned();
+    }
 }
 
 fn detect_build_volume(line: &str) -> Option<PrintableArea> {
@@ -1035,10 +1144,10 @@ struct WebWorker {
 
 #[cfg(target_arch = "wasm32")]
 impl WebWorker {
-    fn spawn() -> Self {
+    fn spawn(language: Language) -> Self {
         let commands = WebCommandQueue::default();
         let events = WebEventQueue::default();
-        spawn_local(run_web_worker(commands.clone(), events.clone()));
+        spawn_local(run_web_worker(commands.clone(), events.clone(), language));
         Self { commands, events }
     }
 
@@ -1052,8 +1161,8 @@ impl WebWorker {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn run_web_worker(commands: WebCommandQueue, events: WebEventQueue) {
-    let result = run_web_worker_inner(commands, events.clone()).await;
+async fn run_web_worker(commands: WebCommandQueue, events: WebEventQueue, language: Language) {
+    let result = run_web_worker_inner(commands, events.clone(), language).await;
     if let Err(error) = result {
         events.push(WorkerEvent::Error(error));
     }
@@ -1064,11 +1173,10 @@ async fn run_web_worker(commands: WebCommandQueue, events: WebEventQueue) {
 async fn run_web_worker_inner(
     commands: WebCommandQueue,
     events: WebEventQueue,
+    language: Language,
 ) -> Result<(), String> {
-    let serial = web_serial_api().ok_or_else(|| {
-        "이 브라우저는 Web Serial API를 지원하지 않습니다. Chrome/Edge의 HTTPS 또는 localhost에서 실행하세요."
-            .to_owned()
-    })?;
+    let serial =
+        web_serial_api().ok_or_else(|| web_serial_unsupported_message(language).to_owned())?;
     let port = await_js(call_method0(&serial, "requestPort")?).await?;
     let options = Object::new();
     Reflect::set(&options, &JsValue::from_str("baudRate"), &JsValue::from_f64(115_200.0))
@@ -1081,7 +1189,7 @@ async fn run_web_worker_inner(
     let writable = Reflect::get(&port, &JsValue::from_str("writable")).map_err(js_error_message)?;
     let writer = call_method0(&writable, "getWriter")?;
 
-    let shared = WebSerialShared::new(commands, events.clone(), writer, reader.clone());
+    let shared = WebSerialShared::new(commands, events.clone(), writer, reader.clone(), language);
     spawn_local(web_writer_loop(shared.clone()));
 
     let mut pending_text = String::new();
@@ -1131,6 +1239,7 @@ struct WebSerialShared(Rc<RefCell<WebSerialState>>);
 struct WebSerialState {
     commands: WebCommandQueue,
     events: WebEventQueue,
+    language: Language,
     writer: JsValue,
     reader: JsValue,
     queued_lines: VecDeque<QueuedLine>,
@@ -1149,10 +1258,12 @@ impl WebSerialShared {
         events: WebEventQueue,
         writer: JsValue,
         reader: JsValue,
+        language: Language,
     ) -> Self {
         Self(Rc::new(RefCell::new(WebSerialState {
             commands,
             events,
+            language,
             writer,
             reader,
             queued_lines: VecDeque::new(),
@@ -1202,6 +1313,7 @@ impl WebSerialShared {
         state.events.push(WorkerEvent::Line(annotate_busy_line(
             line.to_owned(),
             state.in_flight_lines.front(),
+            state.language,
         )));
     }
 }
@@ -1275,9 +1387,7 @@ async fn web_writer_loop(shared: WebSerialShared) {
                     last_ready_ping_ms = now;
                     Some((state.writer.clone(), b"M115\n".to_vec()))
                 } else if now - ready_started_ms >= READY_TIMEOUT.as_millis() as f64 {
-                    state.events.push(WorkerEvent::Error(
-                        "펌웨어가 준비 응답을 보내지 않았습니다.".to_owned(),
-                    ));
+                    state.events.push(WorkerEvent::ReadyTimeout);
                     state.disconnect_requested = true;
                     None
                 } else {

@@ -17,7 +17,10 @@ use crate::{
             ToolpathPlan,
         },
     },
-    res::colors,
+    res::{
+        colors,
+        lang::{Language, Strings},
+    },
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -32,8 +35,10 @@ const PREVIEW_CONTROL_OVERLAY_MARGIN: f32 = 12.0;
 const CONTROL_BUTTON_WIDTH: f32 = 44.0;
 const CONTROL_BUTTON_HEIGHT: f32 = 44.0;
 const CONTROL_GRID_SPACING: f32 = 4.0;
+const APP_STATE_STORAGE_KEY: &str = eframe::APP_KEY;
 
 pub struct PenarticApp {
+    language: Language,
     settings: ToolSettings,
     device: DeviceController,
     preview_renderer: PreviewRenderer,
@@ -55,6 +60,8 @@ pub struct PenarticApp {
 
 #[derive(Clone)]
 struct LoadedSvg {
+    file_name: String,
+    bytes: Vec<u8>,
     document: paths::ParsedSvg,
 }
 
@@ -95,6 +102,10 @@ impl SvgPlacementState {
 }
 
 impl PenarticApp {
+    fn text(&self) -> &'static Strings {
+        self.language.strings()
+    }
+
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         preview_msaa_samples: u32,
@@ -105,10 +116,16 @@ impl PenarticApp {
         #[cfg(target_arch = "wasm32")]
         fonts::apply_fallback_fonts(&cc.egui_ctx, fonts::web_fallback_fonts());
 
-        let mut device = DeviceController::new();
+        let language = cc
+            .storage
+            .and_then(|storage| storage.get_string(APP_STATE_STORAGE_KEY))
+            .and_then(|value| Language::from_storage_key(&value))
+            .unwrap_or_default();
+        let mut device = DeviceController::new(language);
         device.refresh_ports();
 
         let mut app = Self {
+            language,
             settings: ToolSettings::default(),
             device,
             preview_renderer: PreviewRenderer::new(cc, preview_msaa_samples),
@@ -135,6 +152,33 @@ impl PenarticApp {
         app
     }
 
+    fn set_language(&mut self, language: Language) {
+        if self.language == language {
+            return;
+        }
+
+        self.language = language;
+        self.device.set_language(language);
+
+        if let Some(result) = self
+            .loaded_svg
+            .as_ref()
+            .map(|svg| paths::parse_svg_with_language(svg.file_name.clone(), &svg.bytes, language))
+        {
+            match result {
+                Ok(document) => {
+                    if let Some(loaded_svg) = self.loaded_svg.as_mut() {
+                        loaded_svg.document = document;
+                    }
+                    self.rebuild_toolpath();
+                }
+                Err(error) => {
+                    self.error_message = Some(error.localized_message(language));
+                }
+            }
+        }
+    }
+
     fn pick_svg(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -148,7 +192,7 @@ impl PenarticApp {
                         self.load_svg(file_name, bytes);
                     }
                     Err(error) => {
-                        self.error_message = Some(format!("SVG 파일을 읽지 못했습니다: {error}"));
+                        self.error_message = Some(self.text().read_svg_file_failed(error));
                     }
                 }
             }
@@ -170,9 +214,9 @@ impl PenarticApp {
     fn load_svg(&mut self, file_name: String, bytes: Vec<u8>) {
         self.settings.sanitize();
 
-        match paths::parse_svg(file_name, &bytes) {
+        match paths::parse_svg_with_language(file_name.clone(), &bytes, self.language) {
             Ok(document) => {
-                let loaded_svg = LoadedSvg { document };
+                let loaded_svg = LoadedSvg { file_name, bytes, document };
                 self.svg_placement =
                     Some(SvgPlacementState::for_svg(&loaded_svg, self.settings.printable_area));
                 self.loaded_svg = Some(loaded_svg);
@@ -184,7 +228,7 @@ impl PenarticApp {
                 self.toolpath_plan = None;
                 self.preview_progress = 0.0;
                 self.preview_playing = false;
-                self.error_message = Some(error.to_string());
+                self.error_message = Some(error.localized_message(self.language));
             }
         }
     }
@@ -198,8 +242,7 @@ impl PenarticApp {
         match self.load_first_dropped_svg(dropped_files) {
             Ok(true) => {}
             Ok(false) => {
-                self.error_message =
-                    Some("드래그 드롭으로는 SVG 파일만 불러올 수 있습니다.".to_owned());
+                self.error_message = Some(self.text().only_svg_drag_drop.to_owned());
             }
             Err(error) => {
                 self.error_message = Some(error);
@@ -225,14 +268,12 @@ impl PenarticApp {
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(path) = file.path.as_ref() {
                 let bytes = std::fs::read(path)
-                    .map_err(|error| format!("드롭한 SVG 파일을 읽지 못했습니다: {error}"))?;
+                    .map_err(|error| self.text().read_dropped_svg_file_failed(error))?;
                 self.load_svg(file_name, bytes);
                 return Ok(true);
             }
 
-            return Err(
-                "드롭한 SVG 데이터를 아직 읽을 수 없습니다. 잠시 후 다시 시도하세요.".to_owned()
-            );
+            return Err(self.text().dropped_svg_not_ready.to_owned());
         }
 
         Ok(false)
@@ -263,7 +304,8 @@ impl PenarticApp {
             svg_placement.placement,
             self.settings.printable_area,
         );
-        self.toolpath_plan = Some(gcode::build_plan(prepared, &self.settings));
+        self.toolpath_plan =
+            Some(gcode::build_plan_with_language(prepared, &self.settings, self.language));
         self.preview_progress = 1.0;
         self.preview_playing = false;
         self.error_message = None;
@@ -354,6 +396,7 @@ impl PenarticApp {
     }
 
     fn show_manual_controls(&mut self, ui: &mut egui::Ui) {
+        let text = self.text();
         let can_control = self.device.is_connected() && !self.device.is_job_active();
         let jog_feed_rate = self.settings.travel_feed_rate();
         let xy_pad_width = CONTROL_BUTTON_WIDTH * 3.0 + CONTROL_GRID_SPACING * 2.0;
@@ -440,14 +483,14 @@ impl PenarticApp {
 
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            ui.label("이동 간격");
+            ui.label(text.jog_step);
             for step in [0.1_f32, 1.0, 10.0, 100.0] {
                 ui.selectable_value(&mut self.jog_step_mm, step, format_jog_step(step));
             }
         });
 
         if !can_control {
-            ui.small("장치가 연결되어 있고 프린트 중이 아닐 때만 수동 제어를 사용할 수 있습니다.");
+            ui.small(text.manual_control_unavailable);
         }
     }
 
@@ -469,29 +512,54 @@ impl PenarticApp {
                         ui.set_width(sidebar_width);
                         ui.set_min_width(sidebar_width);
 
-                        if ui.button("SVG 불러오기").clicked() {
+                        let mut selected_language = self.language;
+                        ui.horizontal(|ui| {
+                            ui.label(self.text().language_label);
+                            egui::ComboBox::from_id_salt("language-setting")
+                                .width(ui.available_width().max(140.0))
+                                .selected_text(selected_language.native_name())
+                                .show_ui(ui, |ui| {
+                                    for language in Language::ALL {
+                                        ui.selectable_value(
+                                            &mut selected_language,
+                                            language,
+                                            language.native_name(),
+                                        );
+                                    }
+                                });
+                        });
+                        if selected_language != self.language {
+                            self.set_language(selected_language);
+                        }
+                        let language = self.language;
+                        let text = self.text();
+
+                        if ui.button(text.load_svg).clicked() {
                             self.pick_svg();
                         }
-                        ui.small("파일 선택이나 드래그 드롭으로 SVG를 불러올 수 있습니다.");
+                        ui.small(text.load_svg_hint);
 
                         if let Some(plan) = &self.toolpath_plan {
-                            if ui.button("G-code 복사").clicked() {
+                            if ui.button(text.copy_gcode).clicked() {
                                 ui.ctx().copy_text(plan.gcode_text());
                             }
                         }
 
                         ui.separator();
-                        ui.heading("디바이스");
+                        ui.heading(text.device_heading);
 
                         let has_device_support =
                             self.device.connection_state() != ConnectionState::Unsupported;
                         let status_color = connection_status_color(&self.device);
                         ui.horizontal(|ui| {
-                            ui.label("상태");
-                            ui.colored_label(status_color, format!("● {}", self.device.status_text()));
+                            ui.label(text.status_label);
+                            ui.colored_label(
+                                status_color,
+                                format!("● {}", self.device.status_text()),
+                            );
                         });
                         ui.horizontal(|ui| {
-                            ui.label("작업");
+                            ui.label(text.job_label);
                             ui.colored_label(
                                 print_state_color(self.device.print_state()),
                                 self.device.print_state_text(),
@@ -500,7 +568,7 @@ impl PenarticApp {
 
                         if let Some(firmware) = self.device.firmware_summary() {
                             ui.horizontal_top(|ui| {
-                                ui.add_sized([56.0, 0.0], egui::Label::new("펌웨어"));
+                                ui.add_sized([56.0, 0.0], egui::Label::new(text.firmware_label));
                                 ui.add_sized(
                                     [ui.available_width().max(0.0), 0.0],
                                     egui::Label::new(firmware).truncate(),
@@ -509,15 +577,12 @@ impl PenarticApp {
                         }
 
                         if let Some(area) = self.device.detected_area() {
-                            ui.label(format!(
-                                "감지된 사이즈: {:.0} x {:.0} mm",
-                                area.width_mm, area.height_mm
-                            ));
+                            ui.label(text.detected_size(area.width_mm, area.height_mm));
                         }
 
                         let mut print_start_mode_changed = false;
                         ui.add_enabled_ui(has_device_support, |ui| {
-                            if ui.button("포트 새로고침").clicked() {
+                            if ui.button(text.refresh_ports).clicked() {
                                 self.device.refresh_ports();
                             }
 
@@ -525,39 +590,49 @@ impl PenarticApp {
                             let combo_width = ui.available_width();
                             egui::ComboBox::from_id_salt("serial-port-combo")
                                 .width(combo_width)
-                                .selected_text(self.device.selected_port().unwrap_or("포트를 선택하세요"))
+                                .selected_text(
+                                    self.device.selected_port().unwrap_or(text.select_port),
+                                )
                                 .show_ui(ui, |ui| {
                                     for port in ports {
-                                        let selected = self.device.selected_port() == Some(port.as_str());
+                                        let selected =
+                                            self.device.selected_port() == Some(port.as_str());
                                         if ui.selectable_label(selected, &port).clicked() {
                                             self.device.set_selected_port(Some(port.clone()));
                                         }
                                     }
                                 });
 
-                            let can_connect =
-                                matches!(self.device.connection_state(), ConnectionState::Disconnected)
-                                    && self.device.can_connect();
+                            let can_connect = matches!(
+                                self.device.connection_state(),
+                                ConnectionState::Disconnected
+                            ) && self.device.can_connect();
                             let can_disconnect = matches!(
                                 self.device.connection_state(),
                                 ConnectionState::Connecting | ConnectionState::Connected
                             );
-                            ui.columns_sized([Size::remainder(1.0), Size::remainder(1.0)], |columns| {
-                                if columns[0]
-                                    .add_enabled(can_connect, egui::Button::new("연결"))
-                                    .clicked()
-                                {
-                                    let result = self.device.connect();
-                                    self.apply_device_action(result);
-                                }
+                            ui.columns_sized(
+                                [Size::remainder(1.0), Size::remainder(1.0)],
+                                |columns| {
+                                    if columns[0]
+                                        .add_enabled(can_connect, egui::Button::new(text.connect))
+                                        .clicked()
+                                    {
+                                        let result = self.device.connect();
+                                        self.apply_device_action(result);
+                                    }
 
-                                if columns[1]
-                                    .add_enabled(can_disconnect, egui::Button::new("연결 해제"))
-                                    .clicked()
-                                {
-                                    self.device.disconnect();
-                                }
-                            });
+                                    if columns[1]
+                                        .add_enabled(
+                                            can_disconnect,
+                                            egui::Button::new(text.disconnect),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.device.disconnect();
+                                    }
+                                },
+                            );
 
                             let can_start_print = self.toolpath_plan.is_some()
                                 && self.device.is_connected()
@@ -565,30 +640,42 @@ impl PenarticApp {
                             let can_stop_print = self.device.can_stop_print();
                             let first_draw_point =
                                 self.toolpath_plan.as_ref().and_then(|plan| plan.first_draw_point);
-                            ui.columns_sized([Size::remainder(1.0), Size::remainder(1.0)], |columns| {
-                                if columns[0]
-                                    .add_enabled(can_start_print, egui::Button::new("프린트 시작"))
-                                    .clicked()
-                                {
-                                    if let Some(plan) = self.toolpath_plan.as_ref() {
-                                        let gcode_lines = plan.gcode_lines.clone();
-                                        let result = self.device.send_job(&gcode_lines);
+                            ui.columns_sized(
+                                [Size::remainder(1.0), Size::remainder(1.0)],
+                                |columns| {
+                                    if columns[0]
+                                        .add_enabled(
+                                            can_start_print,
+                                            egui::Button::new(text.start_print),
+                                        )
+                                        .clicked()
+                                    {
+                                        if let Some(plan) = self.toolpath_plan.as_ref() {
+                                            let gcode_lines = plan.gcode_lines.clone();
+                                            let result = self.device.send_job(&gcode_lines);
+                                            self.apply_device_action(result);
+                                        }
+                                    }
+
+                                    if columns[1]
+                                        .add_enabled(
+                                            can_stop_print,
+                                            egui::Button::new(text.stop_print),
+                                        )
+                                        .clicked()
+                                    {
+                                        let result = self.device.stop_job();
                                         self.apply_device_action(result);
                                     }
-                                }
-
-                                if columns[1]
-                                    .add_enabled(can_stop_print, egui::Button::new("프린트 정지"))
-                                    .clicked()
-                                {
-                                    let result = self.device.stop_job();
-                                    self.apply_device_action(result);
-                                }
-                            });
+                                },
+                            );
 
                             let mut start_with_home =
                                 self.settings.print_start_mode == PrintStartMode::HomeBeforePrint;
-                            if ui.checkbox(&mut start_with_home, "프린트 시작 전에 XY Home 이동").changed() {
+                            if ui
+                                .checkbox(&mut start_with_home, text.home_xy_before_print)
+                                .changed()
+                            {
                                 self.settings.print_start_mode = if start_with_home {
                                     PrintStartMode::HomeBeforePrint
                                 } else {
@@ -597,9 +684,7 @@ impl PenarticApp {
                                 print_start_mode_changed = true;
                             }
                             if !start_with_home {
-                                ui.small(
-                                    "끄면 XY Home 없이 Z 리프트 후 첫 시작점으로 이동해 그리기 시작합니다.",
-                                );
+                                ui.small(text.direct_start_without_home_hint);
                             }
 
                             let can_move_to_first_draw_point = first_draw_point.is_some()
@@ -608,7 +693,7 @@ impl PenarticApp {
                             if ui
                                 .add_enabled(
                                     can_move_to_first_draw_point,
-                                    egui::Button::new("첫 시작점으로 이동"),
+                                    egui::Button::new(text.move_to_first_start_point),
                                 )
                                 .clicked()
                             {
@@ -623,13 +708,14 @@ impl PenarticApp {
                                 }
                             }
 
-                            let can_move_to_timeline_position = self.current_timeline_position().is_some()
-                                && self.device.is_connected()
-                                && !self.device.is_job_active();
+                            let can_move_to_timeline_position =
+                                self.current_timeline_position().is_some()
+                                    && self.device.is_connected()
+                                    && !self.device.is_job_active();
                             if ui
                                 .add_enabled(
                                     can_move_to_timeline_position,
-                                    egui::Button::new("현재 위치로 이동"),
+                                    egui::Button::new(text.move_to_current_position),
                                 )
                                 .clicked()
                             {
@@ -649,17 +735,18 @@ impl PenarticApp {
                             let can_move_to_bounds_corner = drawing_bounds_corners.is_some()
                                 && self.device.is_connected()
                                 && !self.device.is_job_active();
-                            ui.label("바운딩 박스 모서리");
+                            ui.label(text.bounding_box_corners);
                             egui::Grid::new("bounds-corner-move-grid")
                                 .num_columns(2)
                                 .spacing(egui::vec2(6.0, 4.0))
                                 .show(ui, |ui| {
                                     if bounds_corner_button(
                                         ui,
-                                        "좌상",
+                                        text.top_left,
                                         drawing_bounds_corners,
                                         2,
                                         can_move_to_bounds_corner,
+                                        language,
                                     )
                                     .clicked()
                                     {
@@ -667,10 +754,11 @@ impl PenarticApp {
                                     }
                                     if bounds_corner_button(
                                         ui,
-                                        "우상",
+                                        text.top_right,
                                         drawing_bounds_corners,
                                         3,
                                         can_move_to_bounds_corner,
+                                        language,
                                     )
                                     .clicked()
                                     {
@@ -680,10 +768,11 @@ impl PenarticApp {
 
                                     if bounds_corner_button(
                                         ui,
-                                        "좌하",
+                                        text.bottom_left,
                                         drawing_bounds_corners,
                                         0,
                                         can_move_to_bounds_corner,
+                                        language,
                                     )
                                     .clicked()
                                     {
@@ -691,10 +780,11 @@ impl PenarticApp {
                                     }
                                     if bounds_corner_button(
                                         ui,
-                                        "우하",
+                                        text.bottom_right,
                                         drawing_bounds_corners,
                                         1,
                                         can_move_to_bounds_corner,
+                                        language,
                                     )
                                     .clicked()
                                     {
@@ -707,33 +797,33 @@ impl PenarticApp {
                         self.show_manual_controls(ui);
 
                         ui.separator();
-                        ui.heading("설정");
+                        ui.heading(text.settings_heading);
 
                         let mut settings_changed = false;
                         settings_changed |= drag_value_row(
                             ui,
-                            "프린트 가능 너비 (mm)",
+                            text.printable_width,
                             &mut self.settings.printable_area.width_mm,
                             1.0,
                             10.0..=1_000.0,
                         );
                         settings_changed |= drag_value_row(
                             ui,
-                            "프린트 가능 높이 (mm)",
+                            text.printable_height,
                             &mut self.settings.printable_area.height_mm,
                             1.0,
                             10.0..=1_000.0,
                         );
                         settings_changed |= drag_value_row(
                             ui,
-                            "프린트 속도 (mm/s)",
+                            text.print_speed,
                             &mut self.settings.print_speed_mm_s,
                             1.0,
                             1.0..=500.0,
                         );
                         settings_changed |= drag_value_row(
                             ui,
-                            "Z 리프트 (mm)",
+                            text.z_lift,
                             &mut self.settings.lift_height_mm,
                             0.1,
                             0.1..=25.0,
@@ -741,26 +831,26 @@ impl PenarticApp {
                         let mut prefer_g2g3 = self.settings.curve_output_mode.prefers_g2g3();
                         let mut prefer_g5 = self.settings.curve_output_mode.prefers_g5();
                         let prefer_g2g3_changed =
-                            ui.checkbox(&mut prefer_g2g3, "원호 G-code 사용 (G2/G3)").changed();
+                            ui.checkbox(&mut prefer_g2g3, text.use_arc_gcode).changed();
                         let prefer_g5_changed =
-                            ui.checkbox(&mut prefer_g5, "Bezier G-code 사용 (G5)").changed();
+                            ui.checkbox(&mut prefer_g5, text.use_bezier_gcode).changed();
                         if prefer_g2g3_changed || prefer_g5_changed {
                             self.settings.curve_output_mode =
                                 CurveOutputMode::from_flags(prefer_g2g3, prefer_g5);
                             settings_changed = true;
                         }
                         if prefer_g2g3 && prefer_g5 {
-                            ui.small("코너 둥글림으로 만든 원호는 G2/G3로, 베지어 곡선은 G5로 내보냅니다.");
+                            ui.small(text.arc_and_bezier_export_hint);
                         } else if prefer_g2g3 {
-                            ui.small("코너 둥글림으로 만든 원호만 G2/G3로 내보내고, 나머지는 선분으로 유지합니다.");
+                            ui.small(text.arc_export_hint);
                         } else if prefer_g5 {
-                            ui.small("지원 펌웨어에서는 곡선을 G5로 내보내고, 미리보기는 동일한 IR에서 계산합니다.");
+                            ui.small(text.bezier_export_hint);
                         }
 
                         if ui
                             .checkbox(
                                 &mut self.settings.corner_smoothing_enabled,
-                                "급한 코너를 미세하게 둥글게 처리",
+                                text.round_sharp_corners,
                             )
                             .changed()
                         {
@@ -769,25 +859,26 @@ impl PenarticApp {
                         if self.settings.corner_smoothing_enabled {
                             settings_changed |= drag_value_row(
                                 ui,
-                                "코너 둥글림 반경 (mm)",
+                                text.corner_rounding_radius,
                                 &mut self.settings.corner_smoothing_radius_mm,
                                 0.05,
                                 0.1..=10.0,
                             );
                             settings_changed |= drag_value_row(
                                 ui,
-                                "코너 둥글림 시작 각도 (°)",
+                                text.corner_rounding_start_angle,
                                 &mut self.settings.corner_smoothing_angle_deg,
                                 1.0,
                                 5.0..=170.0,
                             );
-                            ui.small("선분-곡선-원호 연결부를 포함해, 끝 접선 각도가 이 값 이상일 때만 짧은 원호를 넣습니다.");
+                            ui.small(text.corner_rounding_hint);
                         }
 
                         ui.separator();
-                        ui.heading("SVG 배치");
+                        ui.heading(text.svg_placement_heading);
 
-                        let current_svg_size = self.toolpath_plan.as_ref().map(|plan| plan.drawing_bounds);
+                        let current_svg_size =
+                            self.toolpath_plan.as_ref().map(|plan| plan.drawing_bounds);
                         let svg_is_out_of_bounds =
                             self.toolpath_plan.as_ref().is_some_and(|plan| plan.is_out_of_bounds);
                         let mut placement_changed = false;
@@ -799,21 +890,21 @@ impl PenarticApp {
 
                             let center_x_changed = drag_value_row(
                                 ui,
-                                "SVG 중심 X (mm)",
+                                text.svg_center_x,
                                 &mut center_x,
                                 1.0,
                                 -5_000.0..=5_000.0,
                             );
                             let center_y_changed = drag_value_row(
                                 ui,
-                                "SVG 중심 Y (mm)",
+                                text.svg_center_y,
                                 &mut center_y,
                                 1.0,
                                 -5_000.0..=5_000.0,
                             );
                             let scale_changed = drag_value_row(
                                 ui,
-                                "SVG 크기 (%)",
+                                text.svg_scale,
                                 &mut scale_percent,
                                 1.0,
                                 1.0..=1_000.0,
@@ -833,17 +924,14 @@ impl PenarticApp {
                             }
 
                             if let Some(size) = current_svg_size {
-                                ui.small(format!("현재 크기: {:.1} x {:.1} mm", size.x, size.y));
+                                ui.small(text.current_size(size.x, size.y));
                             }
-                            ui.small("100%는 SVG 좌표 1단위를 1mm로 본 초기 크기입니다.");
+                            ui.small(text.svg_scale_hint);
                             if svg_is_out_of_bounds {
-                                ui.colored_label(
-                                    colors::warning(),
-                                    "SVG가 현재 프린트 가능 영역을 벗어났습니다.",
-                                );
+                                ui.colored_label(colors::warning(), text.svg_out_of_bounds);
                             }
                         } else {
-                            ui.small("SVG를 불러오면 위치와 크기를 조절할 수 있습니다.");
+                            ui.small(text.load_svg_to_adjust_position);
                         }
 
                         if settings_changed || placement_changed || print_start_mode_changed {
@@ -851,19 +939,18 @@ impl PenarticApp {
                         }
 
                         ui.separator();
-                        ui.heading("잡 정보");
+                        ui.heading(text.job_info_heading);
 
                         if let Some(plan) = &self.toolpath_plan {
                             ui.label(format!("SVG: {}", plan.source_name));
-                            ui.label(format!(
-                                "그려지는 범위: {:.1} x {:.1} mm",
-                                plan.drawing_bounds.x, plan.drawing_bounds.y
-                            ));
-                            ui.label(format!("스트로크 수: {}", plan.stats.stroke_count));
-                            ui.label(format!("세그먼트 수: {}", plan.stats.segment_count));
-                            ui.label(format!("드로잉 거리: {:.1} mm", plan.stats.drawing_distance_mm));
-                            ui.label(format!("이동 거리: {:.1} mm", plan.stats.travel_distance_mm));
-                            ui.label(format!("예상 소요 시간: {:.1} s", plan.stats.estimated_duration_s));
+                            ui.label(
+                                text.drawing_bounds(plan.drawing_bounds.x, plan.drawing_bounds.y),
+                            );
+                            ui.label(text.stroke_count(plan.stats.stroke_count));
+                            ui.label(text.segment_count(plan.stats.segment_count));
+                            ui.label(text.drawing_distance(plan.stats.drawing_distance_mm));
+                            ui.label(text.travel_distance(plan.stats.travel_distance_mm));
+                            ui.label(text.estimated_duration(plan.stats.estimated_duration_s));
 
                             if !plan.warnings.is_empty() {
                                 ui.separator();
@@ -872,7 +959,7 @@ impl PenarticApp {
                                 }
                             }
                         } else {
-                            ui.label("아직 변환된 SVG가 없습니다.");
+                            ui.label(text.no_converted_svg);
                         }
 
                         if let Some(error) = &self.error_message {
@@ -890,7 +977,7 @@ impl PenarticApp {
     }
 
     fn show_device_log(&self, ui: &mut egui::Ui) {
-        ui.heading("장치 로그");
+        ui.heading(self.text().device_log_heading);
         let log_width = ui.available_width();
         egui::ScrollArea::vertical()
             .max_height(ui.available_height())
@@ -906,6 +993,7 @@ impl PenarticApp {
     }
 
     fn show_central_panel(&mut self, root_ui: &mut egui::Ui) {
+        let language = self.language;
         let timeline_text = self
             .toolpath_plan
             .as_ref()
@@ -932,6 +1020,7 @@ impl PenarticApp {
                     self.preview_progress,
                     self.show_travel_moves,
                     self.show_drawing_bounds,
+                    language,
                     &mut self.viewport_state,
                 );
                 self.show_preview_controls_overlay(ui, preview_rect, &timeline_text);
@@ -945,6 +1034,7 @@ impl PenarticApp {
         preview_rect: egui::Rect,
         timeline_text: &str,
     ) {
+        let text = self.text();
         let available_height = preview_rect.height() - PREVIEW_CONTROL_OVERLAY_MARGIN * 2.0;
         let available_width = preview_rect.width() - PREVIEW_CONTROL_OVERLAY_MARGIN * 2.0;
         if available_height <= 0.0 || available_width <= 0.0 {
@@ -976,7 +1066,7 @@ impl PenarticApp {
                 overlay_ui.set_width(inner_rect.width());
 
                 overlay_ui.horizontal(|ui| {
-                    let toggle_label = if self.preview_playing { "일시정지" } else { "재생" };
+                    let toggle_label = if self.preview_playing { text.pause } else { text.play };
                     if ui
                         .add_enabled(self.toolpath_plan.is_some(), egui::Button::new(toggle_label))
                         .clicked()
@@ -988,15 +1078,15 @@ impl PenarticApp {
                     }
 
                     if ui
-                        .add_enabled(self.toolpath_plan.is_some(), egui::Button::new("처음으로"))
+                        .add_enabled(self.toolpath_plan.is_some(), egui::Button::new(text.reset))
                         .clicked()
                     {
                         self.preview_progress = 0.0;
                         self.preview_playing = false;
                     }
 
-                    ui.checkbox(&mut self.show_travel_moves, "펜 리프트 이동 경로 표시");
-                    ui.checkbox(&mut self.show_drawing_bounds, "바운딩 박스 표시");
+                    ui.checkbox(&mut self.show_travel_moves, text.show_pen_lift_travel_paths);
+                    ui.checkbox(&mut self.show_drawing_bounds, text.show_bounding_box);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(timeline_text);
@@ -1053,6 +1143,10 @@ impl eframe::App for PenarticApp {
         self.show_sidebar(ui);
         self.show_central_panel(ui);
     }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(APP_STATE_STORAGE_KEY, self.language.storage_key().to_owned());
+    }
 }
 
 fn drag_value_row(
@@ -1089,11 +1183,12 @@ fn bounds_corner_button(
     corners: Option<[glam::Vec2; 4]>,
     index: usize,
     enabled: bool,
+    language: Language,
 ) -> egui::Response {
     let tooltip = corners
         .and_then(|corners| corners.get(index).copied())
         .map(|corner| format!("{label}: X {:.2}, Y {:.2}", corner.x, corner.y))
-        .unwrap_or_else(|| "SVG를 불러오면 사용할 수 있습니다.".to_owned());
+        .unwrap_or_else(|| language.strings().load_svg_to_use_control.to_owned());
     ui.add_enabled(enabled, egui::Button::new(label).min_size(egui::vec2(48.0, 24.0)))
         .on_hover_text(tooltip)
 }

@@ -7,8 +7,8 @@ mod res;
 mod validation;
 
 use gui::app::PenarticApp;
-
 pub use gui::app::PenarticApp as App;
+pub use res::lang::Language;
 #[cfg(not(target_arch = "wasm32"))]
 pub use validation::{NativeScreenshotValidationConfig, run_native_screenshot_validation};
 
@@ -39,9 +39,14 @@ fn load_startup_svg() -> (Option<gui::app::StartupSvg>, Option<String>) {
                 .unwrap_or_else(|| path.display().to_string());
             (Some(gui::app::StartupSvg { file_name, bytes }), None)
         }
-        Err(error) => {
-            (None, Some(format!("시작 SVG 파일을 읽지 못했습니다 ({}): {error}", path.display())))
-        }
+        Err(error) => (
+            None,
+            Some(
+                res::lang::Language::default()
+                    .strings()
+                    .startup_svg_read_failed(path.display(), error),
+            ),
+        ),
     }
 }
 

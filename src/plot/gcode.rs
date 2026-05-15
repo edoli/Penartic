@@ -8,6 +8,7 @@ use crate::{
         CurveOutputMode, MotionKind, MotionSegment, PrintStartMode, ToolSettings, ToolpathPlan,
         ToolpathStats,
     },
+    res::lang::Language,
 };
 
 const ARC_PREVIEW_SEGMENT_LENGTH_MM: f32 = 2.0;
@@ -194,7 +195,17 @@ impl ArcSegment {
     }
 }
 
+#[allow(dead_code)]
 pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPlan {
+    build_plan_with_language(prepared, settings, Language::default())
+}
+
+pub fn build_plan_with_language(
+    prepared: PreparedSvg,
+    settings: &ToolSettings,
+    language: Language,
+) -> ToolpathPlan {
+    let text = language.strings();
     let PreparedSvg {
         source_name,
         strokes,
@@ -325,16 +336,10 @@ pub fn build_plan(prepared: PreparedSvg, settings: &ToolSettings) -> ToolpathPla
 
     let mut warnings = warnings;
     if settings.curve_output_mode.prefers_g2g3() && has_arc_primitives {
-        warnings.push(
-            "G2/G3 원호 출력은 지원 펌웨어에서만 올바르게 동작합니다. 지원하지 않으면 원호 출력을 끄세요."
-                .to_owned(),
-        );
+        warnings.push(text.g2g3_firmware_warning.to_owned());
     }
     if settings.curve_output_mode.prefers_g5() && has_g5_primitives {
-        warnings.push(
-            "G5 곡선 출력은 지원 펌웨어에서만 올바르게 동작합니다. 지원하지 않으면 선분 출력 모드를 사용하세요."
-                .to_owned(),
-        );
+        warnings.push(text.g5_firmware_warning.to_owned());
     }
 
     ToolpathPlan {

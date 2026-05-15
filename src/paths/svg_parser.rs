@@ -2,7 +2,10 @@ use glam::{Vec2, vec2};
 use thiserror::Error;
 use usvg::{Node, Options, Tree, tiny_skia_path::PathSegment};
 
-use crate::plot::model::{PrintableArea, SvgPlacement};
+use crate::{
+    plot::model::{PrintableArea, SvgPlacement},
+    res::lang::Language,
+};
 
 use super::ir::{DashPattern, Segment, Stroke, StrokeSegments, Strokes};
 use super::stroke_processing::{normalize_strokes, stroke_bounds};
@@ -45,10 +48,20 @@ struct SourceBounds {
 
 #[derive(Debug, Error)]
 pub enum SvgParserError {
-    #[error("SVG를 읽을 수 없습니다: {0}")]
+    #[error("Failed to parse SVG: {0}")]
     Parse(#[from] usvg::Error),
-    #[error("SVG 안에서 그릴 수 있는 path를 찾지 못했습니다.")]
+    #[error("No drawable paths were found in the SVG.")]
     NoPaths,
+}
+
+impl SvgParserError {
+    pub fn localized_message(&self, language: Language) -> String {
+        let text = language.strings();
+        match self {
+            Self::Parse(error) => text.parse_svg_failed(error),
+            Self::NoPaths => text.no_drawable_paths_in_svg.to_owned(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -69,10 +82,20 @@ impl ParsedSvg {
     }
 }
 
+#[allow(dead_code)]
 pub fn parse_svg(
     source_name: impl Into<String>,
     bytes: &[u8],
 ) -> Result<ParsedSvg, SvgParserError> {
+    parse_svg_with_language(source_name, bytes, Language::default())
+}
+
+pub fn parse_svg_with_language(
+    source_name: impl Into<String>,
+    bytes: &[u8],
+    language: Language,
+) -> Result<ParsedSvg, SvgParserError> {
+    let text = language.strings();
     let source_name = source_name.into();
     let tree = Tree::from_data(bytes, &Options::default())?;
     let mut raw_strokes = Vec::new();
@@ -91,13 +114,10 @@ pub fn parse_svg(
     let source_size = max - min;
     let mut warnings = Vec::new();
     if tree.has_text_nodes() || warning_flags.saw_text {
-        warnings
-            .push("텍스트 노드는 현재 툴패스로 변환되지 않아 미리보기에서 제외됩니다.".to_owned());
+        warnings.push(text.text_nodes_not_converted.to_owned());
     }
     if warning_flags.saw_image {
-        warnings.push(
-            "내장 이미지 노드는 현재 툴패스로 변환되지 않아 미리보기에서 제외됩니다.".to_owned(),
-        );
+        warnings.push(text.image_nodes_not_converted.to_owned());
     }
 
     let bounds = SourceBounds { min, max, size: source_size };

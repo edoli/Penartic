@@ -18,7 +18,7 @@ The product must remain useful even when no device is connected:
 ### 2.1 Offline workflow
 
 1. Start the app without a device.
-2. Set printable width, printable height, draw speed, Z lift height, optional G2/G3 or G5 output, and tangent-based corner-smoothing controls from the left sidebar. The default Z lift is 1.0 mm.
+2. Choose the UI language from the left sidebar (default: English), then set printable width, printable height, draw speed, Z lift height, optional G2/G3 or G5 output, and tangent-based corner-smoothing controls. The default Z lift is 1.0 mm.
 3. Load an SVG file through the file picker, drag-and-drop, or a native startup path used for validation.
 4. Start from the SVG's raw coordinate size interpreted as millimeters, centered once on load, then adjust SVG position and size from the left sidebar when needed.
 5. Convert the SVG into a reusable IR and then into preview motion plus G-code without automatically rescaling the existing SVG placement when printable area settings later change.
@@ -50,6 +50,7 @@ The product must remain useful even when no device is connected:
 | `src/gui/app.rs` | Main egui application state, sidebar UI, SVG loading, SVG placement controls, playback controls, and layout wiring |
 | `src/gui/viewer.rs` | Custom WGPU paint callback for the bed, pen mesh, and timeline-aware motion preview |
 | `src/gui/fonts.rs` | Native fallback CJK font discovery, deferred native font loading, and bundled web CJK font registration |
+| `src/res/lang/mod.rs` + `src/res/lang/english.rs` + `src/res/lang/korean.rs` | Shared language enum, localization abstraction, and concrete English/Korean string resources used across UI, SVG warnings, and device messaging |
 | `src/paths/ir.rs` | Generic path intermediate-representation primitives, stroke collection aliases, curve math, dash splitting, and polyline approximation helpers |
 | `src/paths/stroke_processing.rs` | Generic stroke normalization, ordering, joining, and geometric bounds helpers used after parsing |
 | `src/paths/svg_parser.rs` | Parse SVG with `usvg`, sample visible SVG paths into path IR, surface SVG-specific warnings, and apply persistent placement transforms |
@@ -65,7 +66,7 @@ The product must remain useful even when no device is connected:
 
 ### 4.1 UI layout
 
-- left sidebar: fixed-width, vertically scrollable device controls, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
+- left sidebar: fixed-width, vertically scrollable language selector, device controls, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
 - sidebar action buttons use a slightly taller shared height, paired device/job actions are laid out in evenly sized columns with explicit spacing, the print-start homing toggle sits directly under the print action row, long firmware text stays on one line with hover access to the full value, the upper sidebar controls scroll independently from a left-aligned device log section that fills the remaining sidebar height, advanced G2/G3, G5, and corner-smoothing controls can be toggled from settings, and sidebar content growth must not resize the 3D preview when the window size stays fixed
 - central panel: a full-size 3D preview canvas with a translucent bottom overlay for playback buttons and the full-width timeline slider so controls remain visible in smaller windows
 - the preview overlay can command a connected idle device to move to the current timeline pen position and can toggle lifted travel paths or the placed SVG bounding box
@@ -95,7 +96,8 @@ updated with the same value to avoid WGPU validation errors.
 
 ## 5. Fonts and localization
 
-- UI strings currently include Korean text and therefore need CJK-capable fallback fonts
+- the UI supports English and Korean, defaults to English, persists the selected language through eframe storage on native and web builds, and sources localized strings from `src/res/lang/english.rs` and `src/res/lang/korean.rs`
+- Korean mode still needs CJK-capable fallback fonts for the UI and warning text
 - native builds asynchronously scan platform font locations and an optional `fallback_font.ttf`
   next to the executable
 - loaded fallback fonts are appended to egui proportional and monospace families

@@ -13,6 +13,7 @@ use glam::{Mat4, Vec2, Vec3, vec3};
 use crate::{
     plot::model::{MotionKind, MotionSegment, PrintableArea, ToolpathPlan},
     res::colors,
+    res::lang::Language,
 };
 
 #[derive(Debug, Clone)]
@@ -185,8 +186,10 @@ impl PreviewRenderer {
         progress: f32,
         show_travel_moves: bool,
         show_drawing_bounds: bool,
+        language: Language,
         state: &mut ViewportState,
     ) -> egui::Rect {
+        let text = language.strings();
         let desired = egui::vec2(desired_size.x.max(1.0), desired_size.y.max(1.0));
         let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::drag());
         let scene_extent = plan
@@ -200,7 +203,7 @@ impl PreviewRenderer {
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "WGPU preview unavailable",
+                text.wgpu_preview_unavailable,
                 egui::TextStyle::Heading.resolve(ui.style()),
                 colors::error(),
             );
@@ -211,7 +214,7 @@ impl PreviewRenderer {
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "SVG를 불러오면 3D 미리보기가 여기에 표시됩니다.",
+                text.load_svg_preview_placeholder,
                 egui::TextStyle::Heading.resolve(ui.style()),
                 colors::muted_text(),
             );
