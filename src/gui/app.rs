@@ -1129,6 +1129,7 @@ impl PenarticApp {
                     placement_changed |= toolbar_drag_value(
                         &mut toolbar_ui,
                         text.object_x_label,
+                        Some("mm"),
                         &mut x,
                         1.0,
                         -5_000.0..=5_000.0,
@@ -1136,6 +1137,7 @@ impl PenarticApp {
                     placement_changed |= toolbar_drag_value(
                         &mut toolbar_ui,
                         text.object_y_label,
+                        Some("mm"),
                         &mut y,
                         1.0,
                         -5_000.0..=5_000.0,
@@ -1143,6 +1145,7 @@ impl PenarticApp {
                     placement_changed |= toolbar_drag_value(
                         &mut toolbar_ui,
                         text.object_scale_label,
+                        Some("%"),
                         &mut scale,
                         1.0,
                         1.0..=1_000.0,
@@ -1150,6 +1153,7 @@ impl PenarticApp {
                     placement_changed |= toolbar_drag_value(
                         &mut toolbar_ui,
                         text.object_rotation_label,
+                        Some("°"),
                         &mut rotation,
                         1.0,
                         -3600.0..=3600.0,
@@ -1200,7 +1204,7 @@ impl PenarticApp {
         else {
             return;
         };
-        let painter = ui.painter();
+        let painter = ui.painter().with_clip_rect(preview_rect);
         let bounds_points = projected_bounds_points(object, preview_rect, view_projection);
         let color_x = egui::Color32::from_rgb(240, 72, 72);
         let color_y = egui::Color32::from_rgb(72, 210, 112);
@@ -1225,8 +1229,8 @@ impl PenarticApp {
                 let y_end = center - egui::vec2(0.0, 56.0);
                 painter.line_segment([center, x_end], egui::Stroke::new(3.0, color_x));
                 painter.line_segment([center, y_end], egui::Stroke::new(3.0, color_y));
-                draw_arrow_head(painter, x_end, egui::vec2(1.0, 0.0), color_x);
-                draw_arrow_head(painter, y_end, egui::vec2(0.0, -1.0), color_y);
+                draw_arrow_head(&painter, x_end, egui::vec2(1.0, 0.0), color_x);
+                draw_arrow_head(&painter, y_end, egui::vec2(0.0, -1.0), color_y);
             }
             ManipulationMode::Scale => {
                 if let Some(points) = bounds_points {
@@ -1406,6 +1410,7 @@ fn drag_value_row(
 fn toolbar_drag_value(
     ui: &mut egui::Ui,
     label: &str,
+    suffix: Option<&str>,
     value: &mut f32,
     speed: f64,
     range: std::ops::RangeInclusive<f32>,
@@ -1413,9 +1418,18 @@ fn toolbar_drag_value(
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label(label);
+
+        let old_spacing = ui.spacing().item_spacing;
+        ui.spacing_mut().item_spacing.x = 2.0;
+
         changed = ui
             .add(egui::DragValue::new(value).speed(speed).range(range).fixed_decimals(2))
             .changed();
+        if let Some(suffix) = suffix {
+            ui.label(suffix);
+        }
+
+        ui.spacing_mut().item_spacing = old_spacing;
     });
     changed
 }
