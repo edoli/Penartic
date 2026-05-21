@@ -80,7 +80,7 @@ pub(super) const STRINGS: Strings = Strings {
     object_y_label: "Y",
     object_scale_label: "S",
     object_rotation_label: "R",
-    object_delete_short: "Del",
+    object_delete_short: "Delete",
     delete_selected_svg: "Delete selected SVG",
     no_svg_selected: "No SVG selected",
     load_svg_to_use_control: "Load an SVG to use this control.",

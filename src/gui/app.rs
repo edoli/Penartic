@@ -1092,8 +1092,8 @@ impl PenarticApp {
         let text = self.text();
 
         let toolbar_rect = egui::Rect::from_min_size(
-            preview_rect.min + egui::vec2(14.0, 12.0),
-            egui::vec2((preview_rect.width() - 28.0).max(1.0), 56.0),
+            preview_rect.min + egui::vec2(8.0, 6.0),
+            egui::vec2((preview_rect.width() - 16.0).max(1.0), 56.0),
         );
         egui::Area::new(egui::Id::new("object-toolbar-overlay"))
             .order(egui::Order::Foreground)
@@ -1414,10 +1414,7 @@ fn toolbar_drag_value(
     ui.horizontal(|ui| {
         ui.label(label);
         changed = ui
-            .add_sized(
-                [86.0, 28.0],
-                egui::DragValue::new(value).speed(speed).range(range).fixed_decimals(2),
-            )
+            .add(egui::DragValue::new(value).speed(speed).range(range).fixed_decimals(2))
             .changed();
     });
     changed
