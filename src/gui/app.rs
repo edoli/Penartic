@@ -50,6 +50,7 @@ pub struct PenarticApp {
     selected_svg_id: Option<u64>,
     next_svg_id: u64,
     manipulation_mode: ManipulationMode,
+    scale_aspect_locked: bool,
     toolpath_plan: Option<ToolpathPlan>,
     preview_progress: f32,
     preview_playing: bool,
@@ -167,6 +168,7 @@ impl PenarticApp {
             selected_svg_id: None,
             next_svg_id: 1,
             manipulation_mode: ManipulationMode::Move,
+            scale_aspect_locked: true,
             toolpath_plan: None,
             preview_progress: 0.0,
             preview_playing: false,
@@ -1136,10 +1138,13 @@ impl PenarticApp {
                 toolbar_ui.separator();
 
                 let mut placement_changed = false;
+                let mut scale_aspect_locked = self.scale_aspect_locked;
                 if let Some(object) = self.selected_svg_mut() {
                     let mut position = object.placement.placement.center_mm;
                     let mut scale_percent = object.placement.scale_percent();
                     let mut local_size_mm = object.placement.local_size_mm(&object.loaded_svg);
+                    let original_scale_percent = scale_percent;
+                    let original_local_size_mm = local_size_mm;
                     let mut rotation = object.placement.placement.rotation_degrees;
                     let position_change = toolbar_group(
                         &mut toolbar_ui,
@@ -1148,6 +1153,7 @@ impl PenarticApp {
                             ToolbarItem::new(&mut position, Some("mm"), -5_000.0..=5_000.0),
                         ),
                     );
+                    toolbar_ui.add_space(18.0);
                     let scale_change = toolbar_group(
                         &mut toolbar_ui,
                         &mut ToolbarGroup::new(
@@ -1160,6 +1166,10 @@ impl PenarticApp {
                             0.01..=50_000.0,
                         )),
                     );
+                    toolbar_ui
+                        .checkbox(&mut scale_aspect_locked, "")
+                        .on_hover_text(text.object_lock_aspect_ratio);
+                    toolbar_ui.add_space(18.0);
                     let rotation_change = toolbar_group(
                         &mut toolbar_ui,
                         &mut ToolbarGroup::new(
@@ -1173,8 +1183,16 @@ impl PenarticApp {
                     if placement_changed {
                         object.placement.placement.center_mm = position;
                         if scale_change.secondary_changed {
+                            if scale_aspect_locked {
+                                local_size_mm =
+                                    locked_aspect_vec2(original_local_size_mm, local_size_mm);
+                            }
                             object.placement.set_local_size_mm(&object.loaded_svg, local_size_mm);
                         } else if scale_change.primary_changed {
+                            if scale_aspect_locked {
+                                scale_percent =
+                                    locked_aspect_vec2(original_scale_percent, scale_percent);
+                            }
                             object.placement.set_scale_percent(scale_percent);
                         }
                         object.placement.placement.rotation_degrees = rotation;
@@ -1182,6 +1200,7 @@ impl PenarticApp {
                 } else {
                     toolbar_ui.label(text.no_svg_selected);
                 }
+                self.scale_aspect_locked = scale_aspect_locked;
 
                 if placement_changed {
                     self.rebuild_toolpath();
@@ -1610,6 +1629,21 @@ fn show_toolbar_number(
         ui.spacing_mut().item_spacing = old_spacing;
     });
     changed
+}
+
+fn locked_aspect_vec2(original: glam::Vec2, edited: glam::Vec2) -> glam::Vec2 {
+    let x_changed = (edited.x - original.x).abs();
+    let y_changed = (edited.y - original.y).abs();
+    if x_changed <= f32::EPSILON && y_changed <= f32::EPSILON {
+        return edited;
+    }
+    if x_changed >= y_changed {
+        let ratio = if original.x.abs() <= f32::EPSILON { 1.0 } else { edited.x / original.x };
+        glam::vec2(edited.x, (original.y * ratio).max(0.01))
+    } else {
+        let ratio = if original.y.abs() <= f32::EPSILON { 1.0 } else { edited.y / original.y };
+        glam::vec2((original.x * ratio).max(0.01), edited.y)
+    }
 }
 
 fn projected_bounds_points(

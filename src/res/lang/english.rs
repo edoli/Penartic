@@ -76,6 +76,7 @@ pub(super) const STRINGS: Strings = Strings {
     object_position_label: "Position",
     object_scale_label: "Scale",
     object_rotation_label: "Rotate",
+    object_lock_aspect_ratio: "Lock aspect ratio",
     object_move_tool: "Move object",
     object_scale_tool: "Scale object",
     object_rotate_tool: "Rotate object",

@@ -119,6 +119,7 @@ pub struct Strings {
     pub object_position_label: &'static str,
     pub object_scale_label: &'static str,
     pub object_rotation_label: &'static str,
+    pub object_lock_aspect_ratio: &'static str,
     pub object_move_tool: &'static str,
     pub object_scale_tool: &'static str,
     pub object_rotate_tool: &'static str,
