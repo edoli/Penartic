@@ -33,7 +33,7 @@ use std::sync::mpsc::{self, TryRecvError};
 use poll_promise::Promise;
 
 const SIDEBAR_WIDTH: f32 = 360.0;
-const PREVIEW_CONTROL_BAND_HEIGHT: f32 = 104.0;
+const PREVIEW_CONTROL_BAND_HEIGHT: f32 = 72.0;
 const PREVIEW_CONTROL_OVERLAY_MARGIN: f32 = 12.0;
 const CONTROL_BUTTON_WIDTH: f32 = 44.0;
 const CONTROL_BUTTON_HEIGHT: f32 = 44.0;
