@@ -4,6 +4,11 @@
 
 - When code changes affect architecture, workflows, supported platforms, settings, dependency/toolchain policy, validation steps, or other user-visible behavior, update `DESIGN.md` in the same task.
 
+## Localization
+
+- Do not hardcode user-facing UI strings in Rust UI code. Add strings to `src/res/lang/mod.rs` and provide matching English and Korean values in `src/res/lang/english.rs` and `src/res/lang/korean.rs`.
+- Short machine-axis labels and icon-like glyphs may remain inline only when they are not natural-language UI text; add localized hover text for unfamiliar controls.
+
 ## SVG-specific Changes
 
 - When modifying SVG loading, parsing, toolpath generation, preview behavior, or SVG-related G-code logic, validate that the sample SVG assets still load successfully.

@@ -1089,6 +1089,7 @@ impl PenarticApp {
         if preview_rect.width() <= 0.0 || preview_rect.height() <= 0.0 {
             return;
         }
+        let text = self.text();
 
         let toolbar_rect = egui::Rect::from_min_size(
             preview_rect.min + egui::vec2(14.0, 12.0),
@@ -1108,21 +1109,15 @@ impl PenarticApp {
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
                 toolbar_ui.set_height(inner_rect.height());
-                toolbar_ui.selectable_value(
-                    &mut self.manipulation_mode,
-                    ManipulationMode::Move,
-                    "↔",
-                );
-                toolbar_ui.selectable_value(
-                    &mut self.manipulation_mode,
-                    ManipulationMode::Scale,
-                    "□",
-                );
-                toolbar_ui.selectable_value(
-                    &mut self.manipulation_mode,
-                    ManipulationMode::Rotate,
-                    "⟳",
-                );
+                toolbar_ui
+                    .selectable_value(&mut self.manipulation_mode, ManipulationMode::Move, "↔")
+                    .on_hover_text(text.object_move_tool);
+                toolbar_ui
+                    .selectable_value(&mut self.manipulation_mode, ManipulationMode::Scale, "□")
+                    .on_hover_text(text.object_scale_tool);
+                toolbar_ui
+                    .selectable_value(&mut self.manipulation_mode, ManipulationMode::Rotate, "⟳")
+                    .on_hover_text(text.object_rotate_tool);
                 toolbar_ui.separator();
 
                 let mut placement_changed = false;
@@ -1131,15 +1126,30 @@ impl PenarticApp {
                     let mut y = object.placement.placement.center_mm.y;
                     let mut scale = object.placement.scale_percent();
                     let mut rotation = object.placement.placement.rotation_degrees;
-                    placement_changed |=
-                        toolbar_drag_value(&mut toolbar_ui, "X", &mut x, 1.0, -5_000.0..=5_000.0);
-                    placement_changed |=
-                        toolbar_drag_value(&mut toolbar_ui, "Y", &mut y, 1.0, -5_000.0..=5_000.0);
-                    placement_changed |=
-                        toolbar_drag_value(&mut toolbar_ui, "S", &mut scale, 1.0, 1.0..=1_000.0);
                     placement_changed |= toolbar_drag_value(
                         &mut toolbar_ui,
-                        "R",
+                        text.object_x_label,
+                        &mut x,
+                        1.0,
+                        -5_000.0..=5_000.0,
+                    );
+                    placement_changed |= toolbar_drag_value(
+                        &mut toolbar_ui,
+                        text.object_y_label,
+                        &mut y,
+                        1.0,
+                        -5_000.0..=5_000.0,
+                    );
+                    placement_changed |= toolbar_drag_value(
+                        &mut toolbar_ui,
+                        text.object_scale_label,
+                        &mut scale,
+                        1.0,
+                        1.0..=1_000.0,
+                    );
+                    placement_changed |= toolbar_drag_value(
+                        &mut toolbar_ui,
+                        text.object_rotation_label,
                         &mut rotation,
                         1.0,
                         -3600.0..=3600.0,
@@ -1151,7 +1161,7 @@ impl PenarticApp {
                         object.placement.placement.rotation_degrees = rotation;
                     }
                 } else {
-                    toolbar_ui.label("No SVG selected");
+                    toolbar_ui.label(text.no_svg_selected);
                 }
 
                 if placement_changed {
@@ -1159,8 +1169,11 @@ impl PenarticApp {
                 }
 
                 if toolbar_ui
-                    .add_enabled(self.selected_svg_id.is_some(), egui::Button::new("Del"))
-                    .on_hover_text("Delete selected SVG")
+                    .add_enabled(
+                        self.selected_svg_id.is_some(),
+                        egui::Button::new(text.object_delete_short),
+                    )
+                    .on_hover_text(text.delete_selected_svg)
                     .clicked()
                 {
                     self.delete_selected_svg();
