@@ -1108,7 +1108,7 @@ impl PenarticApp {
 
         let toolbar_rect = egui::Rect::from_min_size(
             preview_rect.min + egui::vec2(8.0, 6.0),
-            egui::vec2((preview_rect.width() - 16.0).max(1.0), 96.0),
+            egui::vec2((preview_rect.width() - 16.0).max(1.0), 64.0),
         );
         egui::Area::new(egui::Id::new("object-toolbar-overlay"))
             .order(egui::Order::Foreground)
@@ -1558,31 +1558,29 @@ fn toolbar_group<T: ToolbarValue>(
     group: &mut ToolbarGroup<'_, T>,
 ) -> ToolbarGroupChange {
     let mut change = ToolbarGroupChange::default();
-    ui.horizontal(|ui| {
-        ui.label(group.label);
-        let row_width = toolbar_value_width::<T>();
-        let row_height = ui.spacing().interact_size.y;
-        let total_height = if group.secondary.is_some() {
-            row_height * 2.0 + ui.spacing().item_spacing.y
-        } else {
-            row_height
-        };
-        ui.allocate_ui_with_layout(
-            egui::vec2(row_width, total_height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                change.primary_changed = group.primary.value.show_fields(
-                    ui,
-                    group.primary.suffix,
-                    group.primary.range.clone(),
-                );
-                if let Some(secondary) = group.secondary.as_mut() {
-                    change.secondary_changed =
-                        secondary.value.show_fields(ui, secondary.suffix, secondary.range.clone());
-                }
-            },
-        );
-    });
+    ui.label(group.label);
+    let row_width = toolbar_value_width::<T>();
+    let row_height = ui.spacing().interact_size.y;
+    let total_height = if group.secondary.is_some() {
+        row_height * 2.0 + ui.spacing().item_spacing.y
+    } else {
+        row_height
+    };
+    ui.allocate_ui_with_layout(
+        egui::vec2(row_width, total_height),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            change.primary_changed = group.primary.value.show_fields(
+                ui,
+                group.primary.suffix,
+                group.primary.range.clone(),
+            );
+            if let Some(secondary) = group.secondary.as_mut() {
+                change.secondary_changed =
+                    secondary.value.show_fields(ui, secondary.suffix, secondary.range.clone());
+            }
+        },
+    );
     change
 }
 
