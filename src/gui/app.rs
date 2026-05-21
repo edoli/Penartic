@@ -73,7 +73,7 @@ struct LoadedSvg {
 #[derive(Clone, Copy)]
 struct SvgPlacementState {
     placement: SvgPlacement,
-    native_scale_mm_per_unit: f32,
+    native_scale_mm_per_unit: glam::Vec2,
 }
 
 #[derive(Clone)]
@@ -109,14 +109,28 @@ impl SvgPlacementState {
         Self { native_scale_mm_per_unit: placement.scale_mm_per_unit, placement }
     }
 
-    fn scale_percent(&self) -> f32 {
-        (self.placement.scale_mm_per_unit / self.native_scale_mm_per_unit.max(1e-4) * 100.0)
-            .max(1.0)
+    fn scale_percent(&self) -> glam::Vec2 {
+        (self.placement.scale_mm_per_unit
+            / self.native_scale_mm_per_unit.max(glam::Vec2::splat(1e-4))
+            * 100.0)
+            .max(glam::Vec2::ONE)
     }
 
-    fn set_scale_percent(&mut self, scale_percent: f32) {
+    fn set_scale_percent(&mut self, scale_percent: glam::Vec2) {
         self.placement.scale_mm_per_unit =
-            (self.native_scale_mm_per_unit.max(1e-4) * (scale_percent.max(1.0) / 100.0)).max(1e-4);
+            (self.native_scale_mm_per_unit.max(glam::Vec2::splat(1e-4))
+                * (scale_percent.max(glam::Vec2::ONE) / 100.0))
+                .max(glam::Vec2::splat(1e-4));
+    }
+
+    fn local_size_mm(&self, svg: &LoadedSvg) -> glam::Vec2 {
+        svg.document.source_size() * self.placement.scale_mm_per_unit
+    }
+
+    fn set_local_size_mm(&mut self, svg: &LoadedSvg, size_mm: glam::Vec2) {
+        let source_size = svg.document.source_size().max(glam::Vec2::splat(1e-4));
+        self.placement.scale_mm_per_unit =
+            (size_mm.max(glam::Vec2::splat(0.01)) / source_size).max(glam::Vec2::splat(1e-4));
     }
 }
 
@@ -470,7 +484,8 @@ impl PenarticApp {
             PreviewManipulation::Scale { id, factor } => {
                 if let Some(object) = self.svg_objects.iter_mut().find(|object| object.id == id) {
                     object.placement.placement.scale_mm_per_unit =
-                        (object.placement.placement.scale_mm_per_unit * factor).clamp(1e-4, 1000.0);
+                        (object.placement.placement.scale_mm_per_unit * factor)
+                            .clamp(glam::Vec2::splat(1e-4), glam::Vec2::splat(1000.0));
                     self.selected_svg_id = Some(id);
                     self.rebuild_toolpath();
                 }
@@ -1093,7 +1108,7 @@ impl PenarticApp {
 
         let toolbar_rect = egui::Rect::from_min_size(
             preview_rect.min + egui::vec2(8.0, 6.0),
-            egui::vec2((preview_rect.width() - 16.0).max(1.0), 56.0),
+            egui::vec2((preview_rect.width() - 16.0).max(1.0), 96.0),
         );
         egui::Area::new(egui::Id::new("object-toolbar-overlay"))
             .order(egui::Order::Foreground)
@@ -1122,46 +1137,46 @@ impl PenarticApp {
 
                 let mut placement_changed = false;
                 if let Some(object) = self.selected_svg_mut() {
-                    let mut x = object.placement.placement.center_mm.x;
-                    let mut y = object.placement.placement.center_mm.y;
-                    let mut scale = object.placement.scale_percent();
+                    let mut position = object.placement.placement.center_mm;
+                    let mut scale_percent = object.placement.scale_percent();
+                    let mut local_size_mm = object.placement.local_size_mm(&object.loaded_svg);
                     let mut rotation = object.placement.placement.rotation_degrees;
-                    placement_changed |= toolbar_drag_value(
+                    let position_change = toolbar_group(
                         &mut toolbar_ui,
-                        text.object_x_label,
-                        Some("mm"),
-                        &mut x,
-                        1.0,
-                        -5_000.0..=5_000.0,
+                        &mut ToolbarGroup::new(
+                            text.object_position_label,
+                            ToolbarItem::new(&mut position, Some("mm"), -5_000.0..=5_000.0),
+                        ),
                     );
-                    placement_changed |= toolbar_drag_value(
+                    let scale_change = toolbar_group(
                         &mut toolbar_ui,
-                        text.object_y_label,
-                        Some("mm"),
-                        &mut y,
-                        1.0,
-                        -5_000.0..=5_000.0,
+                        &mut ToolbarGroup::new(
+                            text.object_scale_label,
+                            ToolbarItem::new(&mut scale_percent, Some("%"), 1.0..=1_000.0),
+                        )
+                        .with_secondary(ToolbarItem::new(
+                            &mut local_size_mm,
+                            Some("mm"),
+                            0.01..=50_000.0,
+                        )),
                     );
-                    placement_changed |= toolbar_drag_value(
+                    let rotation_change = toolbar_group(
                         &mut toolbar_ui,
-                        text.object_scale_label,
-                        Some("%"),
-                        &mut scale,
-                        1.0,
-                        1.0..=1_000.0,
+                        &mut ToolbarGroup::new(
+                            text.object_rotation_label,
+                            ToolbarItem::new(&mut rotation, Some("°"), -3600.0..=3600.0),
+                        ),
                     );
-                    placement_changed |= toolbar_drag_value(
-                        &mut toolbar_ui,
-                        text.object_rotation_label,
-                        Some("°"),
-                        &mut rotation,
-                        1.0,
-                        -3600.0..=3600.0,
-                    );
+                    placement_changed = position_change.changed()
+                        || scale_change.changed()
+                        || rotation_change.changed();
                     if placement_changed {
-                        object.placement.placement.center_mm.x = x;
-                        object.placement.placement.center_mm.y = y;
-                        object.placement.set_scale_percent(scale);
+                        object.placement.placement.center_mm = position;
+                        if scale_change.secondary_changed {
+                            object.placement.set_local_size_mm(&object.loaded_svg, local_size_mm);
+                        } else if scale_change.primary_changed {
+                            object.placement.set_scale_percent(scale_percent);
+                        }
                         object.placement.placement.rotation_degrees = rotation;
                     }
                 } else {
@@ -1407,28 +1422,193 @@ fn drag_value_row(
     changed
 }
 
-fn toolbar_drag_value(
+struct ToolbarItem<'a, T> {
+    value: &'a mut T,
+    suffix: Option<&'a str>,
+    range: std::ops::RangeInclusive<f32>,
+}
+
+impl<'a, T> ToolbarItem<'a, T> {
+    fn new(
+        value: &'a mut T,
+        suffix: Option<&'a str>,
+        range: std::ops::RangeInclusive<f32>,
+    ) -> Self {
+        Self { value, suffix, range }
+    }
+}
+
+struct ToolbarGroup<'a, T> {
+    label: &'a str,
+    primary: ToolbarItem<'a, T>,
+    secondary: Option<ToolbarItem<'a, T>>,
+}
+
+impl<'a, T> ToolbarGroup<'a, T> {
+    fn new(label: &'a str, primary: ToolbarItem<'a, T>) -> Self {
+        Self { label, primary, secondary: None }
+    }
+
+    fn with_secondary(mut self, secondary: ToolbarItem<'a, T>) -> Self {
+        self.secondary = Some(secondary);
+        self
+    }
+}
+
+#[derive(Default)]
+struct ToolbarGroupChange {
+    primary_changed: bool,
+    secondary_changed: bool,
+}
+
+impl ToolbarGroupChange {
+    fn changed(&self) -> bool {
+        self.primary_changed || self.secondary_changed
+    }
+}
+
+trait ToolbarValue {
+    fn field_count() -> usize;
+    fn show_fields(
+        &mut self,
+        ui: &mut egui::Ui,
+        suffix: Option<&str>,
+        range: std::ops::RangeInclusive<f32>,
+    ) -> bool;
+}
+
+impl ToolbarValue for f32 {
+    fn field_count() -> usize {
+        1
+    }
+
+    fn show_fields(
+        &mut self,
+        ui: &mut egui::Ui,
+        suffix: Option<&str>,
+        range: std::ops::RangeInclusive<f32>,
+    ) -> bool {
+        show_toolbar_number(ui, self, suffix, range)
+    }
+}
+
+impl ToolbarValue for i32 {
+    fn field_count() -> usize {
+        1
+    }
+
+    fn show_fields(
+        &mut self,
+        ui: &mut egui::Ui,
+        suffix: Option<&str>,
+        range: std::ops::RangeInclusive<f32>,
+    ) -> bool {
+        let mut value = *self as f32;
+        let changed = show_toolbar_number(ui, &mut value, suffix, range);
+        if changed {
+            *self = value.round() as i32;
+        }
+        changed
+    }
+}
+
+impl ToolbarValue for glam::Vec2 {
+    fn field_count() -> usize {
+        2
+    }
+
+    fn show_fields(
+        &mut self,
+        ui: &mut egui::Ui,
+        suffix: Option<&str>,
+        range: std::ops::RangeInclusive<f32>,
+    ) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            changed |= show_toolbar_number(ui, &mut self.x, None, range.clone());
+            changed |= show_toolbar_number(ui, &mut self.y, suffix, range);
+        });
+        changed
+    }
+}
+
+impl ToolbarValue for glam::Vec3 {
+    fn field_count() -> usize {
+        3
+    }
+
+    fn show_fields(
+        &mut self,
+        ui: &mut egui::Ui,
+        suffix: Option<&str>,
+        range: std::ops::RangeInclusive<f32>,
+    ) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            changed |= show_toolbar_number(ui, &mut self.x, None, range.clone());
+            changed |= show_toolbar_number(ui, &mut self.y, None, range.clone());
+            changed |= show_toolbar_number(ui, &mut self.z, suffix, range);
+        });
+        changed
+    }
+}
+
+fn toolbar_group<T: ToolbarValue>(
     ui: &mut egui::Ui,
-    label: &str,
-    suffix: Option<&str>,
+    group: &mut ToolbarGroup<'_, T>,
+) -> ToolbarGroupChange {
+    let mut change = ToolbarGroupChange::default();
+    ui.horizontal(|ui| {
+        ui.label(group.label);
+        let row_width = toolbar_value_width::<T>();
+        let row_height = ui.spacing().interact_size.y;
+        let total_height = if group.secondary.is_some() {
+            row_height * 2.0 + ui.spacing().item_spacing.y
+        } else {
+            row_height
+        };
+        ui.allocate_ui_with_layout(
+            egui::vec2(row_width, total_height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                change.primary_changed = group.primary.value.show_fields(
+                    ui,
+                    group.primary.suffix,
+                    group.primary.range.clone(),
+                );
+                if let Some(secondary) = group.secondary.as_mut() {
+                    change.secondary_changed =
+                        secondary.value.show_fields(ui, secondary.suffix, secondary.range.clone());
+                }
+            },
+        );
+    });
+    change
+}
+
+fn toolbar_value_width<T: ToolbarValue>() -> f32 {
+    T::field_count() as f32 * 78.0 + 32.0
+}
+
+fn show_toolbar_number(
+    ui: &mut egui::Ui,
     value: &mut f32,
-    speed: f64,
+    suffix: Option<&str>,
     range: std::ops::RangeInclusive<f32>,
 ) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
-        ui.label(label);
-
         let old_spacing = ui.spacing().item_spacing;
         ui.spacing_mut().item_spacing.x = 2.0;
-
         changed = ui
-            .add(egui::DragValue::new(value).speed(speed).range(range).fixed_decimals(2))
+            .add_sized(
+                [72.0, ui.spacing().interact_size.y],
+                egui::DragValue::new(value).speed(1.0).range(range).fixed_decimals(2),
+            )
             .changed();
         if let Some(suffix) = suffix {
             ui.label(suffix);
         }
-
         ui.spacing_mut().item_spacing = old_spacing;
     });
     changed

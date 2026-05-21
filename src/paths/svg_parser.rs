@@ -72,9 +72,8 @@ struct WarningFlags {
 
 impl ParsedSvg {
     pub fn centered_native_placement(&self, printable_area: PrintableArea) -> SvgPlacement {
-        let scale_mm_per_unit = 1.0;
         let center_mm = vec2(printable_area.width_mm * 0.5, printable_area.height_mm * 0.5);
-        SvgPlacement::new(center_mm, scale_mm_per_unit)
+        SvgPlacement::new(center_mm, 1.0)
     }
 
     pub fn source_size(&self) -> Vec2 {

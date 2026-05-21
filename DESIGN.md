@@ -20,7 +20,7 @@ The product must remain useful even when no device is connected:
 1. Start the app without a device.
 2. Choose the UI language from the left sidebar (default: English), then set printable width, printable height, draw speed, Z lift height, optional G2/G3 or G5 output, and tangent-based corner-smoothing controls. The default Z lift is 1.0 mm.
 3. Load one or more SVG files through the file picker, drag-and-drop, or a native startup path used for validation.
-4. Start each SVG from its raw coordinate size interpreted as millimeters, centered once on load, then select individual SVG objects and adjust position, scale, and rotation from the object toolbar or preview gizmo controls when needed.
+4. Start each SVG from its raw coordinate size interpreted as millimeters, centered once on load, then select individual SVG objects and adjust position, independent X/Y scale, local width/height in millimeters, and rotation from the object toolbar or preview gizmo controls when needed.
 5. Convert each SVG into reusable IR, combine the placed objects into one preview motion/G-code job, and avoid automatically rescaling existing SVG placements when printable area settings later change.
 6. Show the completed result immediately in the 3D preview, then scrub backward or replay it with the timeline slider using real motion time.
 7. Copy the generated G-code if needed.
@@ -68,7 +68,7 @@ The product must remain useful even when no device is connected:
 
 - left sidebar: fixed-width, vertically scrollable language selector, device controls, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
 - sidebar action buttons use a slightly taller shared height, paired device/job actions are laid out in evenly sized columns with explicit spacing, the print-start homing toggle sits directly under the print action row, long firmware text stays on one line with hover access to the full value, the upper sidebar controls scroll independently from a left-aligned device log section that fills the remaining sidebar height, advanced G2/G3, G5, and corner-smoothing controls can be toggled from settings, and sidebar content growth must not resize the 3D preview when the window size stays fixed
-- central panel: a full-size 3D preview canvas with a translucent top object toolbar for move/scale/rotate selection, numeric X/Y/scale/rotation edits, and selected-object deletion; mode-specific gizmos provide move arrows, scale handles, or a rotation ring, and a translucent bottom overlay keeps playback buttons and the full-width timeline slider visible in smaller windows
+- central panel: a full-size 3D preview canvas with a translucent top object toolbar for move/scale/rotate selection, numeric X/Y position, independent X/Y scale percentages, local width/height millimeter edits, rotation edits, and selected-object deletion; mode-specific gizmos provide move arrows, scale handles, or a rotation ring, and a translucent bottom overlay keeps playback buttons and the full-width timeline slider visible in smaller windows
 - the preview overlay can command a connected idle device to move to the current timeline pen position and can toggle lifted travel paths or the placed SVG bounding box
 
 ### 4.2 3D preview
@@ -115,7 +115,7 @@ updated with the same value to avoid WGPU validation errors.
   serial stream is active; Marlin `M211` `Min:`/`Max:` reports are used to detect printable width and height when `M503` does not include build volume
 - if device probing fails, the manually configured printable area remains authoritative
 - detected printable area changes are applied only when the reported size actually changes, to avoid redundant rebuild churn
-- printable area changes rebuild the preview/toolpath but do not overwrite user-adjusted SVG object placement, scale, or rotation
+- printable area changes rebuild the preview/toolpath but do not overwrite user-adjusted SVG object placement, independent X/Y scale, local size, or rotation
 - printing state is tracked explicitly so start/stop/connect/disconnect controls can be enabled only when valid
 - the UI keeps polling the native serial worker while a device is connected or connecting, so asynchronous probe responses can update settings after the initial click frame
 - direct jog/home controls send synchronized metric movement commands for XY and Z when no print job is active

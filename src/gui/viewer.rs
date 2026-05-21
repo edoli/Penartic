@@ -56,7 +56,7 @@ pub struct PreviewObjectBounds {
 pub enum PreviewManipulation {
     Select(u64),
     Move { id: u64, delta_mm: Vec2 },
-    Scale { id: u64, factor: f32 },
+    Scale { id: u64, factor: Vec2 },
     Rotate { id: u64, delta_degrees: f32 },
 }
 
@@ -123,11 +123,14 @@ impl ViewportState {
                                 delta_mm: current_mm - previous_mm,
                             }),
                             ManipulationMode::Scale => object_center.map(|center| {
-                                let previous_radius = previous_mm.distance(center).max(1.0);
-                                let current_radius = current_mm.distance(center).max(1.0);
+                                let previous_offset = previous_mm - center;
+                                let current_offset = current_mm - center;
                                 PreviewManipulation::Scale {
                                     id,
-                                    factor: (current_radius / previous_radius).clamp(0.25, 4.0),
+                                    factor: Vec2::new(
+                                        axis_scale_factor(previous_offset.x, current_offset.x),
+                                        axis_scale_factor(previous_offset.y, current_offset.y),
+                                    ),
                                 }
                             }),
                             ManipulationMode::Rotate => object_center.map(|center| {
@@ -819,6 +822,13 @@ fn distance_to_screen_segment(point: egui::Pos2, start: egui::Pos2, end: egui::P
     }
     let t = ((point - start).dot(segment) / length_sq).clamp(0.0, 1.0);
     point.distance(start + segment * t)
+}
+
+fn axis_scale_factor(previous: f32, current: f32) -> f32 {
+    if previous.abs() <= 1.0 {
+        return 1.0;
+    }
+    (current.abs() / previous.abs()).clamp(0.25, 4.0)
 }
 
 fn append_bed(
