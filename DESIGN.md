@@ -19,9 +19,9 @@ The product must remain useful even when no device is connected:
 
 1. Start the app without a device.
 2. Choose the UI language from the left sidebar (default: English), then set printable width, printable height, draw speed, Z lift height, optional G2/G3 or G5 output, and tangent-based corner-smoothing controls. The default Z lift is 1.0 mm.
-3. Load an SVG file through the file picker, drag-and-drop, or a native startup path used for validation.
-4. Start from the SVG's raw coordinate size interpreted as millimeters, centered once on load, then adjust SVG position and size from the left sidebar when needed.
-5. Convert the SVG into a reusable IR and then into preview motion plus G-code without automatically rescaling the existing SVG placement when printable area settings later change.
+3. Load one or more SVG files through the file picker, drag-and-drop, or a native startup path used for validation.
+4. Start each SVG from its raw coordinate size interpreted as millimeters, centered once on load, then select individual SVG objects and adjust position, scale, and rotation from the object toolbar or preview gizmo controls when needed.
+5. Convert each SVG into reusable IR, combine the placed objects into one preview motion/G-code job, and avoid automatically rescaling existing SVG placements when printable area settings later change.
 6. Show the completed result immediately in the 3D preview, then scrub backward or replay it with the timeline slider using real motion time.
 7. Copy the generated G-code if needed.
 
@@ -47,8 +47,8 @@ The product must remain useful even when no device is connected:
 
 | Module | Responsibility |
 | --- | --- |
-| `src/gui/app.rs` | Main egui application state, sidebar UI, SVG loading, SVG placement controls, playback controls, and layout wiring |
-| `src/gui/viewer.rs` | Custom WGPU paint callback for the bed, pen mesh, and timeline-aware motion preview |
+| `src/gui/app.rs` | Main egui application state, sidebar UI, multi-SVG object loading/selection, placement controls, playback controls, and layout wiring |
+| `src/gui/viewer.rs` | Custom WGPU paint callback for the bed, pen mesh, timeline-aware motion preview, and bed-plane object manipulation hit testing |
 | `src/gui/fonts.rs` | Native fallback CJK font discovery, deferred native font loading, and bundled web CJK font registration |
 | `src/res/lang/mod.rs` + `src/res/lang/english.rs` + `src/res/lang/korean.rs` | Shared language enum, localization abstraction, and concrete English/Korean string resources used across UI, SVG warnings, and device messaging |
 | `src/paths/ir.rs` | Generic path intermediate-representation primitives, stroke collection aliases, curve math, dash splitting, and polyline approximation helpers |
@@ -68,7 +68,7 @@ The product must remain useful even when no device is connected:
 
 - left sidebar: fixed-width, vertically scrollable language selector, device controls, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
 - sidebar action buttons use a slightly taller shared height, paired device/job actions are laid out in evenly sized columns with explicit spacing, the print-start homing toggle sits directly under the print action row, long firmware text stays on one line with hover access to the full value, the upper sidebar controls scroll independently from a left-aligned device log section that fills the remaining sidebar height, advanced G2/G3, G5, and corner-smoothing controls can be toggled from settings, and sidebar content growth must not resize the 3D preview when the window size stays fixed
-- central panel: a full-size 3D preview canvas with a translucent bottom overlay for playback buttons and the full-width timeline slider so controls remain visible in smaller windows
+- central panel: a full-size 3D preview canvas with a translucent top object toolbar for move/scale/rotate selection, numeric X/Y/scale/rotation edits, and selected-object deletion; mode-specific gizmos provide move arrows, scale handles, or a rotation ring, and a translucent bottom overlay keeps playback buttons and the full-width timeline slider visible in smaller windows
 - the preview overlay can command a connected idle device to move to the current timeline pen position and can toggle lifted travel paths or the placed SVG bounding box
 
 ### 4.2 3D preview
@@ -80,9 +80,9 @@ window. The callback draws:
 - completed draw segments, plus travel segments when the preview option to show lifted pen moves is enabled
 - the current pen mesh at the playback position
 - motion progress using elapsed toolpath time rather than raw segment count
-- out-of-bounds SVG segments, plus the placed SVG bounding box when the matching preview option is enabled
+- out-of-bounds SVG segments, plus the combined placed SVG bounding box when the matching preview option is enabled
 - the default camera starts from a front-aligned orientation instead of a rotated diagonal view
-- left drag rotates the camera and right drag pans the view across the bed plane
+- left drag rotates the camera unless it starts on a selectable SVG object; object drags manipulate the selected object according to the top toolbar mode, and right drag pans the view across the bed plane
 - preview vertex buffers may grow when printable area or toolpath density changes and therefore must be resized safely before queue writes
 - preview geometry is cached in world coordinates and transformed in the preview shader with a
   per-frame camera uniform, so panning/rotating/zooming complex SVGs does not rebuild or re-upload
@@ -115,7 +115,7 @@ updated with the same value to avoid WGPU validation errors.
   serial stream is active; Marlin `M211` `Min:`/`Max:` reports are used to detect printable width and height when `M503` does not include build volume
 - if device probing fails, the manually configured printable area remains authoritative
 - detected printable area changes are applied only when the reported size actually changes, to avoid redundant rebuild churn
-- printable area changes rebuild the preview/toolpath but do not overwrite a user-adjusted SVG placement or size
+- printable area changes rebuild the preview/toolpath but do not overwrite user-adjusted SVG object placement, scale, or rotation
 - printing state is tracked explicitly so start/stop/connect/disconnect controls can be enabled only when valid
 - the UI keeps polling the native serial worker while a device is connected or connecting, so asynchronous probe responses can update settings after the initial click frame
 - direct jog/home controls send synchronized metric movement commands for XY and Z when no print job is active
@@ -134,19 +134,20 @@ updated with the same value to avoid WGPU validation errors.
 3. Convert path segments into generic IR strokes that preserve line, quadratic, and cubic geometry.
 4. Capture stroke dash metadata so visible dashed spans can be generated from IR instead of being lost during parsing.
 5. Compute intrinsic SVG bounds.
-6. On load, create a one-time centered default placement that interprets SVG coordinate units as millimeters instead of auto-fitting to the printable area.
-7. Reuse the user-controlled SVG placement for later rebuilds instead of auto-rescaling when printable area changes.
+6. On load, create a one-time centered default object placement that interprets SVG coordinate units as millimeters instead of auto-fitting to the printable area; later SVG imports append new objects instead of replacing existing ones.
+7. Reuse each user-controlled SVG object placement for later rebuilds instead of auto-rescaling when printable area changes. The selected object can be deleted with Delete.
 8. Convert raw SVG coordinates into source drawing space, split dashed strokes once, merge IR
    segments shorter than 0.5 mm into neighboring segments, drop strokes whose resulting length is
    still below 0.5 mm, then reorder strokes with a KD-tree-backed greedy nearest-endpoint pass and
    reverse individual strokes when their end point is closer than their start point. After ordering,
    adjacent strokes whose endpoint gap is 0.5 mm or smaller are joined into one continuous IR stroke.
-9. Apply the current placement to the already ordered IR when SVG position or scale changes, so
+9. Apply the current placement to the already ordered IR when SVG position, scale, or rotation changes, so
    placement rebuilds do not repeat dash splitting or stroke-order optimization.
-10. Optionally replace sharp joins between adjacent primitives by comparing their end/start tangents and inserting a tiny rounded transition using a configurable radius and turn-angle threshold.
-11. Mark drawings that extend beyond the printable area so the UI and preview can warn/highlight them.
-12. Build preview motion segments with explicit travel lifts from the IR plus any generated rounded corners.
-13. Emit standard linear G-code, optional `G2`/`G3` arc commands for compatible rounded corners, and optional `G5` curve commands for preserved Bézier geometry or fallback rounded fillets from the same pipeline.
+10. Combine all placed objects into a single prepared drawing job while preserving per-object placement state for selection, warnings, and manipulation.
+11. Optionally replace sharp joins between adjacent primitives by comparing their end/start tangents and inserting a tiny rounded transition using a configurable radius and turn-angle threshold.
+12. Mark drawings that extend beyond the printable area so the UI and preview can warn/highlight them.
+13. Build preview motion segments with explicit travel lifts from the IR plus any generated rounded corners.
+14. Emit standard linear G-code, optional `G2`/`G3` arc commands for compatible rounded corners, and optional `G5` curve commands for preserved Bézier geometry or fallback rounded fillets from the same pipeline.
 
 Current non-goals:
 

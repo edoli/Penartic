@@ -6,7 +6,10 @@ use std::time::Duration;
 use eframe::egui;
 
 use super::layout::{Size, UiLayoutExt};
-use super::viewer::{PreviewRenderer, ViewportState};
+use super::viewer::{
+    ManipulationMode, PreviewManipulation, PreviewObjectBounds, PreviewRenderer, ViewportState,
+    project_bed_point,
+};
 use crate::{
     paths,
     platform::device::{ConnectionState, DeviceController, PrintState},
@@ -43,8 +46,10 @@ pub struct PenarticApp {
     device: DeviceController,
     preview_renderer: PreviewRenderer,
     viewport_state: ViewportState,
-    loaded_svg: Option<LoadedSvg>,
-    svg_placement: Option<SvgPlacementState>,
+    svg_objects: Vec<SvgObject>,
+    selected_svg_id: Option<u64>,
+    next_svg_id: u64,
+    manipulation_mode: ManipulationMode,
     toolpath_plan: Option<ToolpathPlan>,
     preview_progress: f32,
     preview_playing: bool,
@@ -69,6 +74,20 @@ struct LoadedSvg {
 struct SvgPlacementState {
     placement: SvgPlacement,
     native_scale_mm_per_unit: f32,
+}
+
+#[derive(Clone)]
+struct SvgObject {
+    id: u64,
+    loaded_svg: LoadedSvg,
+    placement: SvgPlacementState,
+    prepared_bounds: Option<PreparedObjectBounds>,
+}
+
+#[derive(Clone, Copy)]
+struct PreparedObjectBounds {
+    origin: glam::Vec2,
+    size: glam::Vec2,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -130,8 +149,10 @@ impl PenarticApp {
             device,
             preview_renderer: PreviewRenderer::new(cc, preview_msaa_samples),
             viewport_state: ViewportState::default(),
-            loaded_svg: None,
-            svg_placement: None,
+            svg_objects: Vec::new(),
+            selected_svg_id: None,
+            next_svg_id: 1,
+            manipulation_mode: ManipulationMode::Move,
             toolpath_plan: None,
             preview_progress: 0.0,
             preview_playing: false,
@@ -160,22 +181,24 @@ impl PenarticApp {
         self.language = language;
         self.device.set_language(language);
 
-        if let Some(result) = self
-            .loaded_svg
-            .as_ref()
-            .map(|svg| paths::parse_svg_with_language(svg.file_name.clone(), &svg.bytes, language))
-        {
-            match result {
+        let mut had_error = false;
+        for object in &mut self.svg_objects {
+            match paths::parse_svg_with_language(
+                object.loaded_svg.file_name.clone(),
+                &object.loaded_svg.bytes,
+                language,
+            ) {
                 Ok(document) => {
-                    if let Some(loaded_svg) = self.loaded_svg.as_mut() {
-                        loaded_svg.document = document;
-                    }
-                    self.rebuild_toolpath();
+                    object.loaded_svg.document = document;
                 }
                 Err(error) => {
                     self.error_message = Some(error.localized_message(language));
+                    had_error = true;
                 }
             }
+        }
+        if !had_error {
+            self.rebuild_toolpath();
         }
     }
 
@@ -217,15 +240,20 @@ impl PenarticApp {
         match paths::parse_svg_with_language(file_name.clone(), &bytes, self.language) {
             Ok(document) => {
                 let loaded_svg = LoadedSvg { file_name, bytes, document };
-                self.svg_placement =
-                    Some(SvgPlacementState::for_svg(&loaded_svg, self.settings.printable_area));
-                self.loaded_svg = Some(loaded_svg);
+                let id = self.next_svg_id;
+                self.next_svg_id += 1;
+                let placement =
+                    SvgPlacementState::for_svg(&loaded_svg, self.settings.printable_area);
+                self.svg_objects.push(SvgObject {
+                    id,
+                    loaded_svg,
+                    placement,
+                    prepared_bounds: None,
+                });
+                self.selected_svg_id = Some(id);
                 self.rebuild_toolpath();
             }
             Err(error) => {
-                self.loaded_svg = None;
-                self.svg_placement = None;
-                self.toolpath_plan = None;
                 self.preview_progress = 0.0;
                 self.preview_playing = false;
                 self.error_message = Some(error.localized_message(self.language));
@@ -282,28 +310,27 @@ impl PenarticApp {
     fn rebuild_toolpath(&mut self) {
         self.settings.sanitize();
 
-        if self.svg_placement.is_none() {
-            if let Some(svg) = self.loaded_svg.as_ref() {
-                self.svg_placement =
-                    Some(SvgPlacementState::for_svg(svg, self.settings.printable_area));
-            }
+        if self.svg_objects.is_empty() {
+            self.toolpath_plan = None;
+            return;
         }
 
-        let Some(svg) = self.loaded_svg.as_ref() else {
-            self.toolpath_plan = None;
-            return;
-        };
-        let Some(svg_placement) = self.svg_placement.as_mut() else {
-            self.toolpath_plan = None;
-            return;
-        };
-        svg_placement.placement.sanitize();
+        let mut prepared_svgs = Vec::with_capacity(self.svg_objects.len());
+        for object in &mut self.svg_objects {
+            object.placement.placement.sanitize();
+            let prepared = paths::prepare_svg(
+                &object.loaded_svg.document,
+                object.placement.placement,
+                self.settings.printable_area,
+            );
+            object.prepared_bounds = Some(PreparedObjectBounds {
+                origin: prepared.drawing_origin,
+                size: prepared.drawing_bounds,
+            });
+            prepared_svgs.push(prepared);
+        }
 
-        let prepared = paths::prepare_svg(
-            &svg.document,
-            svg_placement.placement,
-            self.settings.printable_area,
-        );
+        let prepared = combine_prepared_svgs(prepared_svgs, self.settings.printable_area);
         self.toolpath_plan =
             Some(gcode::build_plan_with_language(prepared, &self.settings, self.language));
         self.preview_progress = 1.0;
@@ -385,6 +412,77 @@ impl PenarticApp {
         let plan = self.toolpath_plan.as_ref()?;
         let (_, _, pen_position) = plan.progress_state(self.preview_progress);
         Some(glam::vec2(pen_position.x, pen_position.y))
+    }
+
+    fn selected_svg_mut(&mut self) -> Option<&mut SvgObject> {
+        let selected_id = self.selected_svg_id?;
+        self.svg_objects.iter_mut().find(|object| object.id == selected_id)
+    }
+
+    fn delete_selected_svg(&mut self) {
+        let Some(selected_id) = self.selected_svg_id else {
+            return;
+        };
+        let before_len = self.svg_objects.len();
+        self.svg_objects.retain(|object| object.id != selected_id);
+        if self.svg_objects.len() == before_len {
+            return;
+        }
+        self.selected_svg_id = self.svg_objects.last().map(|object| object.id);
+        self.rebuild_toolpath();
+    }
+
+    fn handle_object_shortcuts(&mut self, ctx: &egui::Context) {
+        if !ctx.egui_wants_keyboard_input()
+            && ctx.input(|input| input.key_pressed(egui::Key::Delete))
+        {
+            self.delete_selected_svg();
+        }
+    }
+
+    fn preview_object_bounds(&self) -> Vec<PreviewObjectBounds> {
+        self.svg_objects
+            .iter()
+            .filter_map(|object| {
+                let bounds = object.prepared_bounds?;
+                Some(PreviewObjectBounds {
+                    id: object.id,
+                    center_mm: object.placement.placement.center_mm,
+                    bounds_origin_mm: bounds.origin,
+                    bounds_size_mm: bounds.size,
+                })
+            })
+            .collect()
+    }
+
+    fn apply_preview_manipulation(&mut self, manipulation: PreviewManipulation) {
+        match manipulation {
+            PreviewManipulation::Select(id) => {
+                self.selected_svg_id = Some(id);
+            }
+            PreviewManipulation::Move { id, delta_mm } => {
+                if let Some(object) = self.svg_objects.iter_mut().find(|object| object.id == id) {
+                    object.placement.placement.center_mm += delta_mm;
+                    self.selected_svg_id = Some(id);
+                    self.rebuild_toolpath();
+                }
+            }
+            PreviewManipulation::Scale { id, factor } => {
+                if let Some(object) = self.svg_objects.iter_mut().find(|object| object.id == id) {
+                    object.placement.placement.scale_mm_per_unit =
+                        (object.placement.placement.scale_mm_per_unit * factor).clamp(1e-4, 1000.0);
+                    self.selected_svg_id = Some(id);
+                    self.rebuild_toolpath();
+                }
+            }
+            PreviewManipulation::Rotate { id, delta_degrees } => {
+                if let Some(object) = self.svg_objects.iter_mut().find(|object| object.id == id) {
+                    object.placement.placement.rotation_degrees += delta_degrees;
+                    self.selected_svg_id = Some(id);
+                    self.rebuild_toolpath();
+                }
+            }
+        }
     }
 
     fn move_to_bounds_corner(&mut self, corners: Option<[glam::Vec2; 4]>, index: usize) {
@@ -874,67 +972,7 @@ impl PenarticApp {
                             ui.small(text.corner_rounding_hint);
                         }
 
-                        ui.separator();
-                        ui.heading(text.svg_placement_heading);
-
-                        let current_svg_size =
-                            self.toolpath_plan.as_ref().map(|plan| plan.drawing_bounds);
-                        let svg_is_out_of_bounds =
-                            self.toolpath_plan.as_ref().is_some_and(|plan| plan.is_out_of_bounds);
-                        let mut placement_changed = false;
-
-                        if let Some(svg_placement) = self.svg_placement.as_mut() {
-                            let mut center_x = svg_placement.placement.center_mm.x;
-                            let mut center_y = svg_placement.placement.center_mm.y;
-                            let mut scale_percent = svg_placement.scale_percent();
-
-                            let center_x_changed = drag_value_row(
-                                ui,
-                                text.svg_center_x,
-                                &mut center_x,
-                                1.0,
-                                -5_000.0..=5_000.0,
-                            );
-                            let center_y_changed = drag_value_row(
-                                ui,
-                                text.svg_center_y,
-                                &mut center_y,
-                                1.0,
-                                -5_000.0..=5_000.0,
-                            );
-                            let scale_changed = drag_value_row(
-                                ui,
-                                text.svg_scale,
-                                &mut scale_percent,
-                                1.0,
-                                1.0..=1_000.0,
-                            );
-
-                            if center_x_changed {
-                                svg_placement.placement.center_mm.x = center_x;
-                                placement_changed = true;
-                            }
-                            if center_y_changed {
-                                svg_placement.placement.center_mm.y = center_y;
-                                placement_changed = true;
-                            }
-                            if scale_changed {
-                                svg_placement.set_scale_percent(scale_percent);
-                                placement_changed = true;
-                            }
-
-                            if let Some(size) = current_svg_size {
-                                ui.small(text.current_size(size.x, size.y));
-                            }
-                            ui.small(text.svg_scale_hint);
-                            if svg_is_out_of_bounds {
-                                ui.colored_label(colors::warning(), text.svg_out_of_bounds);
-                            }
-                        } else {
-                            ui.small(text.load_svg_to_adjust_position);
-                        }
-
-                        if settings_changed || placement_changed || print_start_mode_changed {
+                        if settings_changed || print_start_mode_changed {
                             self.rebuild_toolpath();
                         }
 
@@ -1013,7 +1051,8 @@ impl PenarticApp {
                 let preview_size =
                     egui::vec2(max_rect.width().max(1.0), max_rect.height().max(1.0));
                 ui.set_min_size(preview_size);
-                let preview_rect = self.preview_renderer.show(
+                let object_bounds = self.preview_object_bounds();
+                let preview_output = self.preview_renderer.show(
                     ui,
                     preview_size,
                     self.toolpath_plan.as_ref(),
@@ -1022,10 +1061,194 @@ impl PenarticApp {
                     self.show_drawing_bounds,
                     language,
                     &mut self.viewport_state,
+                    &object_bounds,
+                    self.selected_svg_id,
+                    self.manipulation_mode,
                 );
-                self.show_preview_controls_overlay(ui, preview_rect, &timeline_text);
+                if let Some(manipulation) = preview_output.manipulation {
+                    self.apply_preview_manipulation(manipulation);
+                }
+                self.show_object_toolbar_overlay(
+                    ui,
+                    preview_output.rect,
+                    preview_output.view_projection,
+                    &object_bounds,
+                );
+                self.show_preview_controls_overlay(ui, preview_output.rect, &timeline_text);
             });
         });
+    }
+
+    fn show_object_toolbar_overlay(
+        &mut self,
+        ui: &mut egui::Ui,
+        preview_rect: egui::Rect,
+        view_projection: glam::Mat4,
+        object_bounds: &[PreviewObjectBounds],
+    ) {
+        if preview_rect.width() <= 0.0 || preview_rect.height() <= 0.0 {
+            return;
+        }
+
+        let toolbar_rect = egui::Rect::from_min_size(
+            preview_rect.min + egui::vec2(14.0, 12.0),
+            egui::vec2((preview_rect.width() - 28.0).max(1.0), 56.0),
+        );
+        egui::Area::new(egui::Id::new("object-toolbar-overlay"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(toolbar_rect.min)
+            .show(ui.ctx(), |ui| {
+                let (area_rect, _) =
+                    ui.allocate_exact_size(toolbar_rect.size(), egui::Sense::hover());
+                ui.painter().rect_filled(area_rect, 6.0, colors::preview_overlay_background());
+                let inner_rect = area_rect.shrink2(egui::vec2(10.0, 8.0));
+                let mut toolbar_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(inner_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                toolbar_ui.set_height(inner_rect.height());
+                toolbar_ui.selectable_value(
+                    &mut self.manipulation_mode,
+                    ManipulationMode::Move,
+                    "↔",
+                );
+                toolbar_ui.selectable_value(
+                    &mut self.manipulation_mode,
+                    ManipulationMode::Scale,
+                    "□",
+                );
+                toolbar_ui.selectable_value(
+                    &mut self.manipulation_mode,
+                    ManipulationMode::Rotate,
+                    "⟳",
+                );
+                toolbar_ui.separator();
+
+                let mut placement_changed = false;
+                if let Some(object) = self.selected_svg_mut() {
+                    let mut x = object.placement.placement.center_mm.x;
+                    let mut y = object.placement.placement.center_mm.y;
+                    let mut scale = object.placement.scale_percent();
+                    let mut rotation = object.placement.placement.rotation_degrees;
+                    placement_changed |=
+                        toolbar_drag_value(&mut toolbar_ui, "X", &mut x, 1.0, -5_000.0..=5_000.0);
+                    placement_changed |=
+                        toolbar_drag_value(&mut toolbar_ui, "Y", &mut y, 1.0, -5_000.0..=5_000.0);
+                    placement_changed |=
+                        toolbar_drag_value(&mut toolbar_ui, "S", &mut scale, 1.0, 1.0..=1_000.0);
+                    placement_changed |= toolbar_drag_value(
+                        &mut toolbar_ui,
+                        "R",
+                        &mut rotation,
+                        1.0,
+                        -3600.0..=3600.0,
+                    );
+                    if placement_changed {
+                        object.placement.placement.center_mm.x = x;
+                        object.placement.placement.center_mm.y = y;
+                        object.placement.set_scale_percent(scale);
+                        object.placement.placement.rotation_degrees = rotation;
+                    }
+                } else {
+                    toolbar_ui.label("No SVG selected");
+                }
+
+                if placement_changed {
+                    self.rebuild_toolpath();
+                }
+
+                if toolbar_ui
+                    .add_enabled(self.selected_svg_id.is_some(), egui::Button::new("Del"))
+                    .on_hover_text("Delete selected SVG")
+                    .clicked()
+                {
+                    self.delete_selected_svg();
+                }
+            });
+
+        self.paint_selected_object_gizmo(ui, preview_rect, view_projection, object_bounds);
+    }
+
+    fn paint_selected_object_gizmo(
+        &self,
+        ui: &mut egui::Ui,
+        preview_rect: egui::Rect,
+        view_projection: glam::Mat4,
+        object_bounds: &[PreviewObjectBounds],
+    ) {
+        let Some(selected_id) = self.selected_svg_id else {
+            return;
+        };
+        let Some(object) = object_bounds.iter().find(|object| object.id == selected_id) else {
+            return;
+        };
+        let Some(center) = project_bed_point(object.center_mm, preview_rect, view_projection)
+        else {
+            return;
+        };
+        let painter = ui.painter();
+        let bounds_points = projected_bounds_points(object, preview_rect, view_projection);
+        let color_x = egui::Color32::from_rgb(240, 72, 72);
+        let color_y = egui::Color32::from_rgb(72, 210, 112);
+        let color_ring = egui::Color32::from_rgb(90, 140, 255);
+        if let Some(points) = bounds_points {
+            for window in points.windows(2) {
+                painter.line_segment(
+                    [window[0], window[1]],
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(140, 170, 220)),
+                );
+            }
+            painter.line_segment(
+                [points[3], points[0]],
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(140, 170, 220)),
+            );
+        }
+
+        painter.circle_filled(center, 5.0, egui::Color32::WHITE);
+        match self.manipulation_mode {
+            ManipulationMode::Move => {
+                let x_end = center + egui::vec2(56.0, 0.0);
+                let y_end = center - egui::vec2(0.0, 56.0);
+                painter.line_segment([center, x_end], egui::Stroke::new(3.0, color_x));
+                painter.line_segment([center, y_end], egui::Stroke::new(3.0, color_y));
+                draw_arrow_head(painter, x_end, egui::vec2(1.0, 0.0), color_x);
+                draw_arrow_head(painter, y_end, egui::vec2(0.0, -1.0), color_y);
+            }
+            ManipulationMode::Scale => {
+                if let Some(points) = bounds_points {
+                    for point in points {
+                        let handle_rect =
+                            egui::Rect::from_center_size(point, egui::vec2(12.0, 12.0));
+                        painter.rect_filled(
+                            handle_rect,
+                            2.0,
+                            egui::Color32::from_rgb(38, 160, 220),
+                        );
+                        painter.rect_stroke(
+                            handle_rect,
+                            2.0,
+                            egui::Stroke::new(1.5, egui::Color32::WHITE),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                }
+            }
+            ManipulationMode::Rotate => {
+                let radius = bounds_points
+                    .map(|points| {
+                        points.iter().map(|point| point.distance(center)).fold(0.0, f32::max) + 18.0
+                    })
+                    .unwrap_or(36.0)
+                    .max(36.0);
+                painter.circle_stroke(center, radius, egui::Stroke::new(2.5, color_ring));
+                let handle_angle = -0.75_f32;
+                let handle =
+                    center + egui::vec2(handle_angle.cos() * radius, handle_angle.sin() * radius);
+                painter.circle_filled(handle, 7.0, color_ring);
+                painter.circle_stroke(handle, 7.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+            }
+        }
     }
 
     fn show_preview_controls_overlay(
@@ -1118,6 +1341,7 @@ impl eframe::App for PenarticApp {
         self.handle_web_file_pick();
         self.handle_fallback_fonts(ctx);
         self.handle_device_updates();
+        self.handle_object_shortcuts(ctx);
         self.update_preview_playback(ctx);
 
         if self.preview_playing {
@@ -1164,6 +1388,94 @@ fn drag_value_row(
             .changed();
     });
     changed
+}
+
+fn toolbar_drag_value(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    speed: f64,
+    range: std::ops::RangeInclusive<f32>,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        changed = ui
+            .add_sized(
+                [86.0, 28.0],
+                egui::DragValue::new(value).speed(speed).range(range).fixed_decimals(2),
+            )
+            .changed();
+    });
+    changed
+}
+
+fn projected_bounds_points(
+    object: &PreviewObjectBounds,
+    preview_rect: egui::Rect,
+    view_projection: glam::Mat4,
+) -> Option<[egui::Pos2; 4]> {
+    let min = object.bounds_origin_mm;
+    let max = object.bounds_origin_mm + object.bounds_size_mm;
+    Some([
+        project_bed_point(min, preview_rect, view_projection)?,
+        project_bed_point(glam::vec2(max.x, min.y), preview_rect, view_projection)?,
+        project_bed_point(max, preview_rect, view_projection)?,
+        project_bed_point(glam::vec2(min.x, max.y), preview_rect, view_projection)?,
+    ])
+}
+
+fn draw_arrow_head(
+    painter: &egui::Painter,
+    tip: egui::Pos2,
+    direction: egui::Vec2,
+    color: egui::Color32,
+) {
+    let direction = direction.normalized();
+    let normal = egui::vec2(-direction.y, direction.x);
+    let back = tip - direction * 12.0;
+    painter.line_segment([tip, back + normal * 5.0], egui::Stroke::new(3.0, color));
+    painter.line_segment([tip, back - normal * 5.0], egui::Stroke::new(3.0, color));
+}
+
+fn combine_prepared_svgs(
+    prepared_svgs: Vec<paths::PreparedSvg>,
+    printable_area: PrintableArea,
+) -> paths::PreparedSvg {
+    let mut source_names = Vec::new();
+    let mut strokes = Vec::new();
+    let mut warnings = Vec::new();
+    let mut min = glam::Vec2::splat(f32::INFINITY);
+    let mut max = glam::Vec2::splat(f32::NEG_INFINITY);
+    let mut is_out_of_bounds = false;
+
+    for prepared in prepared_svgs {
+        source_names.push(prepared.source_name);
+        warnings.extend(prepared.warnings);
+        min = min.min(prepared.drawing_origin);
+        max = max.max(prepared.drawing_origin + prepared.drawing_bounds);
+        is_out_of_bounds |= prepared.is_out_of_bounds;
+        strokes.extend(prepared.strokes);
+    }
+
+    if !min.is_finite() || !max.is_finite() {
+        min = glam::Vec2::ZERO;
+        max = glam::Vec2::ZERO;
+    }
+
+    is_out_of_bounds |= min.x < -0.01
+        || min.y < -0.01
+        || max.x > printable_area.width_mm + 0.01
+        || max.y > printable_area.height_mm + 0.01;
+
+    paths::PreparedSvg {
+        source_name: source_names.join(", "),
+        strokes,
+        warnings,
+        drawing_origin: min,
+        drawing_bounds: max - min,
+        is_out_of_bounds,
+    }
 }
 
 fn drawing_bounds_corners(plan: &ToolpathPlan) -> [glam::Vec2; 4] {

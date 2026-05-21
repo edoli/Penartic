@@ -22,16 +22,131 @@ pub struct ViewportState {
     pitch: f32,
     zoom: f32,
     pan: Vec2,
+    active_object_id: Option<u64>,
 }
 
 impl Default for ViewportState {
     fn default() -> Self {
-        Self { yaw: -std::f32::consts::FRAC_PI_2, pitch: 0.75, zoom: 1.15, pan: Vec2::ZERO }
+        Self {
+            yaw: -std::f32::consts::FRAC_PI_2,
+            pitch: 0.75,
+            zoom: 1.15,
+            pan: Vec2::ZERO,
+            active_object_id: None,
+        }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManipulationMode {
+    Move,
+    Scale,
+    Rotate,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PreviewObjectBounds {
+    pub id: u64,
+    pub center_mm: Vec2,
+    pub bounds_origin_mm: Vec2,
+    pub bounds_size_mm: Vec2,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PreviewManipulation {
+    Select(u64),
+    Move { id: u64, delta_mm: Vec2 },
+    Scale { id: u64, factor: f32 },
+    Rotate { id: u64, delta_degrees: f32 },
+}
+
+#[derive(Debug, Clone)]
+pub struct PreviewOutput {
+    pub rect: egui::Rect,
+    pub view_projection: Mat4,
+    pub manipulation: Option<PreviewManipulation>,
+}
+
 impl ViewportState {
-    fn handle_input(&mut self, response: &egui::Response, ui: &egui::Ui, scene_extent: f32) {
+    fn handle_input(
+        &mut self,
+        response: &egui::Response,
+        ui: &egui::Ui,
+        scene_extent: f32,
+        view_projection: Mat4,
+        objects: &[PreviewObjectBounds],
+        selected_object_id: Option<u64>,
+        mode: ManipulationMode,
+    ) -> Option<PreviewManipulation> {
+        if !ui.input(|input| input.pointer.primary_down()) {
+            self.active_object_id = None;
+        }
+
+        let mut manipulation = None;
+        if response.drag_started_by(egui::PointerButton::Primary)
+            || response.clicked_by(egui::PointerButton::Primary)
+        {
+            if let Some(pointer) = response.interact_pointer_pos() {
+                if let Some(world) = screen_to_bed(pointer, response.rect, view_projection) {
+                    if let Some(id) = hit_object(
+                        pointer,
+                        world,
+                        response.rect,
+                        view_projection,
+                        objects,
+                        selected_object_id,
+                        mode,
+                    ) {
+                        self.active_object_id = Some(id);
+                        manipulation = Some(PreviewManipulation::Select(id));
+                    }
+                }
+            }
+        }
+
+        if let Some(id) = self.active_object_id {
+            if response.dragged_by(egui::PointerButton::Primary) {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    let pointer_delta = ui.input(|input| input.pointer.delta());
+                    let previous = pointer - pointer_delta;
+                    if let (Some(current_mm), Some(previous_mm)) = (
+                        screen_to_bed(pointer, response.rect, view_projection),
+                        screen_to_bed(previous, response.rect, view_projection),
+                    ) {
+                        let object_center = objects
+                            .iter()
+                            .find(|object| object.id == id)
+                            .map(|object| object.center_mm);
+                        manipulation = match mode {
+                            ManipulationMode::Move => Some(PreviewManipulation::Move {
+                                id,
+                                delta_mm: current_mm - previous_mm,
+                            }),
+                            ManipulationMode::Scale => object_center.map(|center| {
+                                let previous_radius = previous_mm.distance(center).max(1.0);
+                                let current_radius = current_mm.distance(center).max(1.0);
+                                PreviewManipulation::Scale {
+                                    id,
+                                    factor: (current_radius / previous_radius).clamp(0.25, 4.0),
+                                }
+                            }),
+                            ManipulationMode::Rotate => object_center.map(|center| {
+                                let previous_angle =
+                                    (previous_mm.y - center.y).atan2(previous_mm.x - center.x);
+                                let current_angle =
+                                    (current_mm.y - center.y).atan2(current_mm.x - center.x);
+                                PreviewManipulation::Rotate {
+                                    id,
+                                    delta_degrees: (current_angle - previous_angle).to_degrees(),
+                                }
+                            }),
+                        };
+                    }
+                }
+            }
+            return manipulation;
+        }
+
         if response.dragged_by(egui::PointerButton::Primary) {
             let drag = response.drag_motion();
             self.yaw -= drag.x * 0.01;
@@ -62,6 +177,7 @@ impl ViewportState {
                 self.zoom = (self.zoom * (1.0 - scroll * 0.0015)).clamp(0.55, 2.4);
             }
         }
+        manipulation
     }
 }
 
@@ -188,14 +304,27 @@ impl PreviewRenderer {
         show_drawing_bounds: bool,
         language: Language,
         state: &mut ViewportState,
-    ) -> egui::Rect {
+        objects: &[PreviewObjectBounds],
+        selected_object_id: Option<u64>,
+        mode: ManipulationMode,
+    ) -> PreviewOutput {
         let text = language.strings();
         let desired = egui::vec2(desired_size.x.max(1.0), desired_size.y.max(1.0));
         let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::drag());
         let scene_extent = plan
             .map(|plan| plan.printable_area.width_mm.max(plan.printable_area.height_mm))
             .unwrap_or(220.0);
-        state.handle_input(&response, ui, scene_extent);
+        let printable_area = plan.map(|plan| plan.printable_area).unwrap_or_default();
+        let view_projection = view_projection_for_area(printable_area, rect.size(), state);
+        let manipulation = state.handle_input(
+            &response,
+            ui,
+            scene_extent,
+            view_projection,
+            objects,
+            selected_object_id,
+            mode,
+        );
 
         ui.painter().rect_filled(rect, 0.0, colors::preview_background());
 
@@ -207,7 +336,7 @@ impl PreviewRenderer {
                 egui::TextStyle::Heading.resolve(ui.style()),
                 colors::error(),
             );
-            return rect;
+            return PreviewOutput { rect, view_projection, manipulation };
         }
 
         let Some(plan) = plan else {
@@ -218,10 +347,9 @@ impl PreviewRenderer {
                 egui::TextStyle::Heading.resolve(ui.style()),
                 colors::muted_text(),
             );
-            return rect;
+            return PreviewOutput { rect, view_projection, manipulation };
         };
 
-        let view_projection = view_projection_for(plan, rect.size(), state);
         let geometry = self.cached_geometry(plan, progress, show_travel_moves, show_drawing_bounds);
 
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
@@ -232,7 +360,7 @@ impl PreviewRenderer {
                 view_projection: CameraUniform::new(view_projection),
             },
         ));
-        rect
+        PreviewOutput { rect, view_projection, manipulation }
     }
 
     fn cached_geometry(
@@ -527,20 +655,19 @@ impl CameraUniform {
     }
 }
 
-fn view_projection_for(
-    plan: &ToolpathPlan,
+fn view_projection_for_area(
+    printable_area: PrintableArea,
     viewport_size: egui::Vec2,
     state: &ViewportState,
 ) -> Mat4 {
     let aspect = (viewport_size.x / viewport_size.y).max(0.1);
     let center = vec3(
-        plan.printable_area.width_mm * 0.5 + state.pan.x,
-        plan.printable_area.height_mm * 0.5 + state.pan.y,
+        printable_area.width_mm * 0.5 + state.pan.x,
+        printable_area.height_mm * 0.5 + state.pan.y,
         0.0,
     );
 
-    let scene_radius =
-        plan.printable_area.width_mm.max(plan.printable_area.height_mm).max(80.0) * 0.9;
+    let scene_radius = printable_area.width_mm.max(printable_area.height_mm).max(80.0) * 0.9;
     let eye_direction = vec3(
         state.yaw.cos() * state.pitch.cos(),
         state.yaw.sin() * state.pitch.cos(),
@@ -551,6 +678,147 @@ fn view_projection_for(
     let view = Mat4::look_at_rh(eye, center + vec3(0.0, 0.0, 2.0), Vec3::Z);
     let projection = Mat4::perspective_rh(35_f32.to_radians(), aspect, 0.1, 5_000.0);
     projection * view
+}
+
+pub fn project_bed_point(
+    point: Vec2,
+    rect: egui::Rect,
+    view_projection: Mat4,
+) -> Option<egui::Pos2> {
+    let clip = view_projection * vec3(point.x, point.y, 0.0).extend(1.0);
+    if clip.w.abs() <= f32::EPSILON {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    Some(egui::pos2(
+        rect.left() + (ndc.x + 1.0) * 0.5 * rect.width(),
+        rect.top() + (1.0 - (ndc.y + 1.0) * 0.5) * rect.height(),
+    ))
+}
+
+fn screen_to_bed(pos: egui::Pos2, rect: egui::Rect, view_projection: Mat4) -> Option<Vec2> {
+    let inverse = view_projection.inverse();
+    let x = ((pos.x - rect.left()) / rect.width()) * 2.0 - 1.0;
+    let y = 1.0 - ((pos.y - rect.top()) / rect.height()) * 2.0;
+    let near = inverse * vec3(x, y, 0.0).extend(1.0);
+    let far = inverse * vec3(x, y, 1.0).extend(1.0);
+    if near.w.abs() <= f32::EPSILON || far.w.abs() <= f32::EPSILON {
+        return None;
+    }
+    let near = near.truncate() / near.w;
+    let far = far.truncate() / far.w;
+    let direction = far - near;
+    if direction.z.abs() <= f32::EPSILON {
+        return None;
+    }
+    let t = -near.z / direction.z;
+    if !t.is_finite() {
+        return None;
+    }
+    let point = near + direction * t;
+    Some(point.truncate())
+}
+
+fn hit_object(
+    pointer: egui::Pos2,
+    point: Vec2,
+    rect: egui::Rect,
+    view_projection: Mat4,
+    objects: &[PreviewObjectBounds],
+    selected_object_id: Option<u64>,
+    mode: ManipulationMode,
+) -> Option<u64> {
+    if let Some(selected) = selected_object_id {
+        if let Some(object) = objects.iter().find(|object| object.id == selected) {
+            if hits_selected_gizmo(pointer, rect, view_projection, object, mode) {
+                return Some(selected);
+            }
+        }
+    }
+
+    let contains = |object: &&PreviewObjectBounds| {
+        point.x >= object.bounds_origin_mm.x
+            && point.y >= object.bounds_origin_mm.y
+            && point.x <= object.bounds_origin_mm.x + object.bounds_size_mm.x
+            && point.y <= object.bounds_origin_mm.y + object.bounds_size_mm.y
+    };
+
+    if let Some(selected) = selected_object_id {
+        if objects.iter().find(|object| object.id == selected).filter(contains).is_some() {
+            return Some(selected);
+        }
+    }
+    objects.iter().rev().find(contains).map(|object| object.id)
+}
+
+fn hits_selected_gizmo(
+    pointer: egui::Pos2,
+    rect: egui::Rect,
+    view_projection: Mat4,
+    object: &PreviewObjectBounds,
+    mode: ManipulationMode,
+) -> bool {
+    let Some(center) = project_bed_point(object.center_mm, rect, view_projection) else {
+        return false;
+    };
+    match mode {
+        ManipulationMode::Move => {
+            let x_end = center + egui::vec2(56.0, 0.0);
+            let y_end = center - egui::vec2(0.0, 56.0);
+            distance_to_screen_segment(pointer, center, x_end) <= 10.0
+                || distance_to_screen_segment(pointer, center, y_end) <= 10.0
+                || pointer.distance(center) <= 14.0
+        }
+        ManipulationMode::Scale => screen_object_corners(object, rect, view_projection)
+            .into_iter()
+            .flatten()
+            .any(|corner| pointer.distance(corner) <= 14.0),
+        ManipulationMode::Rotate => {
+            let radius = selected_gizmo_screen_radius(object, rect, view_projection).max(34.0);
+            (pointer.distance(center) - radius).abs() <= 12.0
+        }
+    }
+}
+
+fn selected_gizmo_screen_radius(
+    object: &PreviewObjectBounds,
+    rect: egui::Rect,
+    view_projection: Mat4,
+) -> f32 {
+    screen_object_corners(object, rect, view_projection)
+        .into_iter()
+        .flatten()
+        .filter_map(|corner| {
+            project_bed_point(object.center_mm, rect, view_projection)
+                .map(|center| corner.distance(center))
+        })
+        .fold(0.0, f32::max)
+        + 18.0
+}
+
+fn screen_object_corners(
+    object: &PreviewObjectBounds,
+    rect: egui::Rect,
+    view_projection: Mat4,
+) -> [Option<egui::Pos2>; 4] {
+    let min = object.bounds_origin_mm;
+    let max = object.bounds_origin_mm + object.bounds_size_mm;
+    [
+        project_bed_point(min, rect, view_projection),
+        project_bed_point(Vec2::new(max.x, min.y), rect, view_projection),
+        project_bed_point(max, rect, view_projection),
+        project_bed_point(Vec2::new(min.x, max.y), rect, view_projection),
+    ]
+}
+
+fn distance_to_screen_segment(point: egui::Pos2, start: egui::Pos2, end: egui::Pos2) -> f32 {
+    let segment = end - start;
+    let length_sq = segment.length_sq();
+    if length_sq <= f32::EPSILON {
+        return point.distance(start);
+    }
+    let t = ((point - start).dot(segment) / length_sq).clamp(0.0, 1.0);
+    point.distance(start + segment * t)
 }
 
 fn append_bed(

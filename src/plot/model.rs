@@ -23,11 +23,12 @@ impl Default for PrintableArea {
 pub struct SvgPlacement {
     pub center_mm: Vec2,
     pub scale_mm_per_unit: f32,
+    pub rotation_degrees: f32,
 }
 
 impl SvgPlacement {
     pub fn new(center_mm: Vec2, scale_mm_per_unit: f32) -> Self {
-        let mut placement = Self { center_mm, scale_mm_per_unit };
+        let mut placement = Self { center_mm, scale_mm_per_unit, rotation_degrees: 0.0 };
         placement.sanitize();
         placement
     }
@@ -39,11 +40,10 @@ impl SvgPlacement {
         if !self.scale_mm_per_unit.is_finite() {
             self.scale_mm_per_unit = 1.0;
         }
+        if !self.rotation_degrees.is_finite() {
+            self.rotation_degrees = 0.0;
+        }
         self.scale_mm_per_unit = self.scale_mm_per_unit.max(1e-4);
-    }
-
-    pub fn drawing_origin(&self, drawing_bounds: Vec2) -> Vec2 {
-        self.center_mm - drawing_bounds * 0.5
     }
 }
 

@@ -77,8 +77,8 @@ impl ParsedSvg {
         SvgPlacement::new(center_mm, scale_mm_per_unit)
     }
 
-    pub fn drawing_size_for(&self, placement: SvgPlacement) -> Vec2 {
-        self.bounds.size * placement.scale_mm_per_unit
+    pub fn source_size(&self) -> Vec2 {
+        self.bounds.size
     }
 }
 
@@ -142,11 +142,19 @@ pub fn prepare_svg(
     let mut placement = placement;
     placement.sanitize();
 
-    let drawing_bounds = parsed.drawing_size_for(placement);
-    let drawing_origin = placement.drawing_origin(drawing_bounds);
-
-    let map = |point: Vec2| point * placement.scale_mm_per_unit + drawing_origin;
-    let strokes = parsed.strokes.iter().map(|stroke| stroke.transformed(map)).collect();
+    let source_size = parsed.source_size();
+    let source_center = source_size * 0.5;
+    let rotation = placement.rotation_degrees.to_radians();
+    let (sin, cos) = rotation.sin_cos();
+    let map = |point: Vec2| {
+        let scaled = (point - source_center) * placement.scale_mm_per_unit;
+        let rotated = vec2(scaled.x * cos - scaled.y * sin, scaled.x * sin + scaled.y * cos);
+        rotated + placement.center_mm
+    };
+    let strokes: Strokes = parsed.strokes.iter().map(|stroke| stroke.transformed(map)).collect();
+    let (drawing_origin, drawing_max) =
+        stroke_bounds(strokes.iter()).unwrap_or((placement.center_mm, placement.center_mm));
+    let drawing_bounds = drawing_max - drawing_origin;
 
     PreparedSvg {
         source_name: parsed.source_name.clone(),
