@@ -14,6 +14,14 @@ use {
 };
 
 const DEVICE_LOG_LIMIT: usize = 48;
+#[cfg(not(target_arch = "wasm32"))]
+const DEFAULT_ESP3D_ENDPOINT: &str = "http://192.168.0.112/";
+#[cfg(not(target_arch = "wasm32"))]
+const ESP3D_DEFAULT_DATA_WEBSOCKET_PORT: u16 = 8282;
+#[cfg(not(target_arch = "wasm32"))]
+const ESP3D_MAX_IN_FLIGHT_LINES: usize = 32;
+#[cfg(not(target_arch = "wasm32"))]
+const ESP3D_TOP_UP_LINES_PER_TICK: usize = 16;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const MAX_IN_FLIGHT_LINES: usize = 1;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -49,6 +57,10 @@ pub struct DeviceController {
     log: VecDeque<String>,
     last_error: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
+    use_esp3d: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    esp3d_endpoint: String,
+    #[cfg(not(target_arch = "wasm32"))]
     worker: Option<NativeWorker>,
     #[cfg(target_arch = "wasm32")]
     worker: Option<WebWorker>,
@@ -71,6 +83,10 @@ impl DeviceController {
             detected_area: None,
             log: VecDeque::new(),
             last_error: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            use_esp3d: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            esp3d_endpoint: DEFAULT_ESP3D_ENDPOINT.to_owned(),
             #[cfg(not(target_arch = "wasm32"))]
             worker: None,
             #[cfg(target_arch = "wasm32")]
@@ -156,6 +172,11 @@ impl DeviceController {
                 self.push_log(self.text().failed_to_read_port_list(error));
             }
         }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.use_esp3d {
+            self.push_log(self.text().esp3d_http_ready);
+        }
     }
 
     pub fn ports(&self) -> &[String] {
@@ -168,6 +189,35 @@ impl DeviceController {
 
     pub fn set_selected_port(&mut self, selected_port: Option<String>) {
         self.selected_port = selected_port;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn use_esp3d(&self) -> bool {
+        self.use_esp3d
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_use_esp3d(&mut self, use_esp3d: bool) {
+        self.use_esp3d = use_esp3d;
+        if use_esp3d {
+            self.push_log(self.text().esp3d_http_ready);
+        } else if self
+            .selected_port
+            .as_ref()
+            .is_none_or(|selected| !self.available_ports.iter().any(|port| port == selected))
+        {
+            self.selected_port = self.available_ports.first().cloned();
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn esp3d_endpoint(&self) -> &str {
+        &self.esp3d_endpoint
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_esp3d_endpoint(&mut self, endpoint: String) {
+        self.esp3d_endpoint = endpoint;
     }
 
     pub fn connection_state(&self) -> ConnectionState {
@@ -228,7 +278,11 @@ impl DeviceController {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            !self.available_ports.is_empty()
+            if self.use_esp3d {
+                !self.esp3d_endpoint.trim().is_empty()
+            } else {
+                !self.available_ports.is_empty()
+            }
         }
     }
 
@@ -275,23 +329,32 @@ impl DeviceController {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let port_name = self
-                .selected_port
-                .clone()
-                .or_else(|| self.available_ports.first().cloned())
-                .ok_or_else(|| self.text().select_serial_port_before_connecting.to_owned())?;
+            let target = if self.use_esp3d {
+                NativeConnectionTarget::Esp3d { endpoint: self.esp3d_endpoint.trim().to_owned() }
+            } else {
+                NativeConnectionTarget::Serial {
+                    port_name: self
+                        .selected_port
+                        .clone()
+                        .or_else(|| self.available_ports.first().cloned())
+                        .ok_or_else(|| {
+                            self.text().select_serial_port_before_connecting.to_owned()
+                        })?,
+                }
+            };
+            let target_label = target.label(self.language);
 
             self.disconnect();
 
-            let (worker, command_tx) = NativeWorker::spawn(port_name.clone(), self.language)?;
+            let (worker, command_tx) = NativeWorker::spawn(target, self.language)?;
             self.worker = Some(worker);
             self.connection_state = ConnectionState::Connecting;
             self.print_state = PrintState::Idle;
             self.last_error = None;
             self.firmware_summary = None;
             self.detected_area = None;
-            self.selected_port = Some(port_name.clone());
-            self.push_log(self.text().trying_to_connect(&port_name));
+            self.selected_port = Some(target_label.clone());
+            self.push_log(self.text().trying_to_connect(&target_label));
 
             if command_tx
                 .send(WorkerCommand::QueueManual(vec![
@@ -571,7 +634,11 @@ impl DeviceController {
             for event in events {
                 match event {
                     WorkerEvent::PortOpened => {
-                        self.push_log(self.text().opened_serial_port_waiting_firmware);
+                        if self.use_esp3d {
+                            self.push_log(self.text().esp3d_http_ready);
+                        } else {
+                            self.push_log(self.text().opened_serial_port_waiting_firmware);
+                        }
                     }
                     WorkerEvent::Connected => {
                         self.connection_state = ConnectionState::Connected;
@@ -677,22 +744,51 @@ struct NativeWorker {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+enum NativeConnectionTarget {
+    Serial { port_name: String },
+    Esp3d { endpoint: String },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeConnectionTarget {
+    fn label(&self, language: Language) -> String {
+        match self {
+            Self::Serial { port_name } => port_name.clone(),
+            Self::Esp3d { endpoint } => {
+                format!("{}: {}", language.strings().esp3d_device, endpoint)
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeWorker {
     fn spawn(
-        port_name: String,
+        target: NativeConnectionTarget,
         language: Language,
     ) -> Result<(Self, std::sync::mpsc::Sender<WorkerCommand>), String> {
         let (command_tx, command_rx) = std::sync::mpsc::channel();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let thread_command_tx = command_tx.clone();
+        let thread_name =
+            format!("penartic-device-{}", sanitize_thread_name(&target.label(language)));
 
         std::thread::Builder::new()
-            .name(format!("penartic-serial-{port_name}"))
-            .spawn(move || run_worker(port_name, command_rx, event_tx, language))
+            .name(thread_name)
+            .spawn(move || run_worker(target, command_rx, event_tx, language))
             .map_err(|error| error.to_string())?;
 
         Ok((Self { command_tx: command_tx.clone(), event_rx }, thread_command_tx))
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sanitize_thread_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' { ch } else { '_' })
+        .take(48)
+        .collect()
 }
 
 enum WorkerCommand {
@@ -715,6 +811,23 @@ enum WorkerEvent {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn run_worker(
+    target: NativeConnectionTarget,
+    command_rx: std::sync::mpsc::Receiver<WorkerCommand>,
+    event_tx: std::sync::mpsc::Sender<WorkerEvent>,
+    language: Language,
+) {
+    match target {
+        NativeConnectionTarget::Serial { port_name } => {
+            run_serial_worker(port_name, command_rx, event_tx, language)
+        }
+        NativeConnectionTarget::Esp3d { endpoint } => {
+            run_esp3d_worker(endpoint, command_rx, event_tx, language)
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_serial_worker(
     port_name: String,
     command_rx: std::sync::mpsc::Receiver<WorkerCommand>,
     event_tx: std::sync::mpsc::Sender<WorkerEvent>,
@@ -896,6 +1009,511 @@ fn run_worker(
     }
 
     let _ = event_tx.send(WorkerEvent::Disconnected);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_esp3d_worker(
+    endpoint: String,
+    command_rx: std::sync::mpsc::Receiver<WorkerCommand>,
+    event_tx: std::sync::mpsc::Sender<WorkerEvent>,
+    language: Language,
+) {
+    if esp3d_websocket_available(&endpoint, language) {
+        run_esp3d_websocket_worker(endpoint, command_rx, event_tx, language);
+    } else {
+        run_esp3d_http_worker(endpoint, command_rx, event_tx, language);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_esp3d_websocket_worker(
+    endpoint: String,
+    command_rx: std::sync::mpsc::Receiver<WorkerCommand>,
+    event_tx: std::sync::mpsc::Sender<WorkerEvent>,
+    language: Language,
+) {
+    use std::io::ErrorKind;
+
+    use tungstenite::{Message, client::IntoClientRequest as _, stream::MaybeTlsStream};
+
+    let result = (|| -> Result<(), String> {
+        let endpoint = normalize_esp3d_endpoint(&endpoint)?;
+        let mut request = endpoint.clone().into_client_request().map_err(|error| {
+            format!("{}: {error}", language.strings().esp3d_http_request_failed)
+        })?;
+        request.headers_mut().insert("Sec-WebSocket-Protocol", "arduino".parse().unwrap());
+        let (mut socket, _) = tungstenite::connect(request).map_err(|error| {
+            format!("{}: {error}", language.strings().esp3d_http_request_failed)
+        })?;
+        if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+            stream.set_read_timeout(Some(Duration::from_millis(100))).map_err(|error| {
+                format!("{}: {error}", language.strings().esp3d_http_request_failed)
+            })?;
+        }
+
+        event_tx.send(WorkerEvent::PortOpened).map_err(|error| error.to_string())?;
+        event_tx.send(WorkerEvent::Connected).map_err(|error| error.to_string())?;
+        event_tx
+            .send(WorkerEvent::Line(language.strings().esp3d_http_connected.to_owned()))
+            .map_err(|error| error.to_string())?;
+
+        let mut queued_lines: VecDeque<QueuedLine> = VecDeque::new();
+        let mut queued_job_count = 0usize;
+        let mut in_flight_lines = VecDeque::new();
+        let mut in_flight_job_count = 0usize;
+        let mut job_active = false;
+        let mut job_cancelled = false;
+
+        loop {
+            while let Ok(command) = command_rx.try_recv() {
+                match command {
+                    WorkerCommand::QueueJob(lines) => {
+                        let lines = clean_gcode_lines(lines);
+                        if !lines.is_empty() {
+                            job_active = true;
+                            job_cancelled = false;
+                        }
+                        queued_job_count += lines.len();
+                        queued_lines.extend(
+                            lines
+                                .into_iter()
+                                .map(|line| QueuedLine { line, source: QueuedLineSource::Job }),
+                        );
+                    }
+                    WorkerCommand::QueueManual(lines) => {
+                        queued_lines.extend(
+                            clean_gcode_lines(lines)
+                                .into_iter()
+                                .map(|line| QueuedLine { line, source: QueuedLineSource::Manual }),
+                        );
+                    }
+                    WorkerCommand::CancelJob => {
+                        job_cancelled = true;
+                        queued_lines = queued_lines
+                            .into_iter()
+                            .filter(|queued| queued.source != QueuedLineSource::Job)
+                            .collect();
+                        queued_job_count = 0;
+                        send_esp3d_websocket_line(
+                            &mut socket,
+                            QueuedLine { line: "M410".to_owned(), source: QueuedLineSource::Stop },
+                            &mut in_flight_lines,
+                            language,
+                        )?;
+                        send_esp3d_websocket_line(
+                            &mut socket,
+                            QueuedLine { line: "M400".to_owned(), source: QueuedLineSource::Stop },
+                            &mut in_flight_lines,
+                            language,
+                        )?;
+                        if in_flight_job_count == 0 {
+                            event_tx
+                                .send(WorkerEvent::JobCancelled)
+                                .map_err(|error| error.to_string())?;
+                            job_cancelled = false;
+                        }
+                    }
+                    WorkerCommand::Disconnect => return Ok(()),
+                }
+            }
+
+            top_up_esp3d_websocket_queue(
+                &mut socket,
+                &mut queued_lines,
+                &mut queued_job_count,
+                &mut in_flight_lines,
+                &mut in_flight_job_count,
+                language,
+            )?;
+
+            match socket.read() {
+                Ok(Message::Text(text)) => {
+                    handle_esp3d_websocket_text(
+                        text.as_str(),
+                        &mut in_flight_lines,
+                        &mut in_flight_job_count,
+                        &queued_job_count,
+                        &mut job_active,
+                        &mut job_cancelled,
+                        &event_tx,
+                        language,
+                    )?;
+                }
+                Ok(Message::Binary(bytes)) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    handle_esp3d_websocket_text(
+                        &text,
+                        &mut in_flight_lines,
+                        &mut in_flight_job_count,
+                        &queued_job_count,
+                        &mut job_active,
+                        &mut job_cancelled,
+                        &event_tx,
+                        language,
+                    )?;
+                }
+                Ok(Message::Ping(payload)) => {
+                    socket.send(Message::Pong(payload)).map_err(|error| {
+                        format!("{}: {error}", language.strings().esp3d_http_request_failed)
+                    })?;
+                }
+                Ok(Message::Close(_)) => return Ok(()),
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(error)) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(tungstenite::Error::Io(error)) if error.kind() == ErrorKind::TimedOut => {}
+                Err(error) => {
+                    return Err(format!(
+                        "{}: {error}",
+                        language.strings().esp3d_http_request_failed
+                    ));
+                }
+            }
+        }
+    })();
+
+    if let Err(error) = result {
+        let _ = event_tx.send(WorkerEvent::Error(error));
+    }
+
+    let _ = event_tx.send(WorkerEvent::Disconnected);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn handle_esp3d_websocket_text(
+    text: &str,
+    in_flight_lines: &mut VecDeque<QueuedLine>,
+    in_flight_job_count: &mut usize,
+    queued_job_count: &usize,
+    job_active: &mut bool,
+    job_cancelled: &mut bool,
+    event_tx: &std::sync::mpsc::Sender<WorkerEvent>,
+    language: Language,
+) -> Result<(), String> {
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if is_ack_line(line) {
+            acknowledge_queued_line(
+                in_flight_lines,
+                in_flight_job_count,
+                *queued_job_count,
+                job_active,
+                job_cancelled,
+                event_tx,
+            )?;
+        }
+
+        let line = annotate_busy_line(line.to_owned(), in_flight_lines.front(), language);
+        event_tx.send(WorkerEvent::Line(line)).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn send_esp3d_websocket_line(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    queued: QueuedLine,
+    in_flight_lines: &mut VecDeque<QueuedLine>,
+    language: Language,
+) -> Result<(), String> {
+    let line = format!("{}\n", queued.line);
+    socket
+        .send(tungstenite::Message::Text(line.into()))
+        .map_err(|error| format!("{}: {error}", language.strings().esp3d_http_request_failed))?;
+    in_flight_lines.push_back(queued);
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn top_up_esp3d_websocket_queue(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    queued_lines: &mut VecDeque<QueuedLine>,
+    queued_job_count: &mut usize,
+    in_flight_lines: &mut VecDeque<QueuedLine>,
+    in_flight_job_count: &mut usize,
+    language: Language,
+) -> Result<(), String> {
+    let mut sent_this_tick = 0usize;
+    while in_flight_lines.len() < ESP3D_MAX_IN_FLIGHT_LINES
+        && sent_this_tick < ESP3D_TOP_UP_LINES_PER_TICK
+    {
+        let Some(queued) = queued_lines.pop_front() else {
+            break;
+        };
+        if queued.source == QueuedLineSource::Job {
+            *queued_job_count = queued_job_count.saturating_sub(1);
+            *in_flight_job_count += 1;
+        }
+        send_esp3d_websocket_line(socket, queued, in_flight_lines, language)?;
+        sent_this_tick += 1;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn acknowledge_queued_line(
+    in_flight_lines: &mut VecDeque<QueuedLine>,
+    in_flight_job_count: &mut usize,
+    queued_job_count: usize,
+    job_active: &mut bool,
+    job_cancelled: &mut bool,
+    event_tx: &std::sync::mpsc::Sender<WorkerEvent>,
+) -> Result<(), String> {
+    let Some(acknowledged) = in_flight_lines.pop_front() else {
+        return Ok(());
+    };
+
+    if acknowledged.source == QueuedLineSource::Job {
+        *in_flight_job_count = (*in_flight_job_count).saturating_sub(1);
+    }
+
+    if *job_active && queued_job_count == 0 && *in_flight_job_count == 0 {
+        let has_in_flight_job =
+            in_flight_lines.iter().any(|line| line.source == QueuedLineSource::Job);
+        if !has_in_flight_job {
+            event_tx
+                .send(if *job_cancelled {
+                    WorkerEvent::JobCancelled
+                } else {
+                    WorkerEvent::JobCompleted
+                })
+                .map_err(|error| error.to_string())?;
+            *job_active = false;
+            *job_cancelled = false;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn esp3d_websocket_available(endpoint: &str, language: Language) -> bool {
+    use tungstenite::client::IntoClientRequest as _;
+
+    let Ok(endpoint) = normalize_esp3d_endpoint(endpoint) else {
+        return false;
+    };
+    let Ok(mut request) = endpoint.into_client_request() else {
+        return false;
+    };
+    request.headers_mut().insert("Sec-WebSocket-Protocol", "arduino".parse().unwrap());
+    match tungstenite::connect(request) {
+        Ok((mut socket, _)) => {
+            let _ = socket.close(None);
+            true
+        }
+        Err(error) => {
+            log::debug!("{}: {error}", language.strings().esp3d_http_request_failed);
+            false
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn normalize_esp3d_endpoint(endpoint: &str) -> Result<String, String> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err("ESP3D endpoint is empty.".to_owned());
+    }
+    if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
+        return Ok(endpoint.to_owned());
+    }
+
+    let (scheme, rest) = if let Some(rest) = endpoint.strip_prefix("http://") {
+        ("ws", rest)
+    } else if let Some(rest) = endpoint.strip_prefix("https://") {
+        ("wss", rest)
+    } else {
+        ("ws", endpoint)
+    };
+    let host_port = rest.split('/').next().unwrap_or(rest).trim_end_matches('/');
+    if host_port.is_empty() {
+        return Err("ESP3D endpoint host is empty.".to_owned());
+    }
+
+    let websocket_host_port = if let Some((host, port)) = host_port.rsplit_once(':') {
+        match port.parse::<u16>() {
+            Ok(80 | 443) => format!("{host}:{ESP3D_DEFAULT_DATA_WEBSOCKET_PORT}"),
+            Ok(_) => format!("{host}:{port}"),
+            Err(_) => format!("{host_port}:{ESP3D_DEFAULT_DATA_WEBSOCKET_PORT}"),
+        }
+    } else {
+        format!("{host_port}:{ESP3D_DEFAULT_DATA_WEBSOCKET_PORT}")
+    };
+    Ok(format!("{scheme}://{websocket_host_port}/"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_esp3d_http_worker(
+    endpoint: String,
+    command_rx: std::sync::mpsc::Receiver<WorkerCommand>,
+    event_tx: std::sync::mpsc::Sender<WorkerEvent>,
+    language: Language,
+) {
+    let result = (|| -> Result<(), String> {
+        let endpoint = normalize_esp3d_http_endpoint(&endpoint)?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|error| error.to_string())?;
+
+        event_tx.send(WorkerEvent::PortOpened).map_err(|error| error.to_string())?;
+        for line in send_esp3d_http_command(&client, &endpoint, "M115", language)? {
+            event_tx.send(WorkerEvent::Line(line)).map_err(|error| error.to_string())?;
+        }
+        event_tx.send(WorkerEvent::Connected).map_err(|error| error.to_string())?;
+
+        let mut queued_lines: VecDeque<QueuedLine> = VecDeque::new();
+        let mut queued_job_count = 0usize;
+        let mut job_cancelled = false;
+
+        loop {
+            while let Ok(command) = command_rx.try_recv() {
+                match command {
+                    WorkerCommand::QueueJob(lines) => {
+                        let lines = clean_gcode_lines(lines);
+                        if !lines.is_empty() {
+                            job_cancelled = false;
+                        }
+                        queued_job_count += lines.len();
+                        queued_lines.extend(
+                            lines
+                                .into_iter()
+                                .map(|line| QueuedLine { line, source: QueuedLineSource::Job }),
+                        );
+                    }
+                    WorkerCommand::QueueManual(lines) => {
+                        queued_lines.extend(
+                            clean_gcode_lines(lines)
+                                .into_iter()
+                                .map(|line| QueuedLine { line, source: QueuedLineSource::Manual }),
+                        );
+                    }
+                    WorkerCommand::CancelJob => {
+                        job_cancelled = true;
+                        queued_lines = queued_lines
+                            .into_iter()
+                            .filter(|queued| queued.source != QueuedLineSource::Job)
+                            .collect();
+                        queued_job_count = 0;
+                        queued_lines.push_front(QueuedLine {
+                            line: "M400".to_owned(),
+                            source: QueuedLineSource::Stop,
+                        });
+                        queued_lines.push_front(QueuedLine {
+                            line: "M410".to_owned(),
+                            source: QueuedLineSource::Stop,
+                        });
+                        event_tx
+                            .send(WorkerEvent::JobCancelled)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    WorkerCommand::Disconnect => return Ok(()),
+                }
+            }
+
+            if let Some(queued) = queued_lines.pop_front() {
+                for line in send_esp3d_http_command(&client, &endpoint, &queued.line, language)? {
+                    event_tx.send(WorkerEvent::Line(line)).map_err(|error| error.to_string())?;
+                }
+
+                if queued.source == QueuedLineSource::Job {
+                    queued_job_count = queued_job_count.saturating_sub(1);
+                    if queued_job_count == 0 {
+                        event_tx
+                            .send(if job_cancelled {
+                                WorkerEvent::JobCancelled
+                            } else {
+                                WorkerEvent::JobCompleted
+                            })
+                            .map_err(|error| error.to_string())?;
+                        job_cancelled = false;
+                    }
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    })();
+
+    if let Err(error) = result {
+        let _ = event_tx.send(WorkerEvent::Error(error));
+    }
+
+    let _ = event_tx.send(WorkerEvent::Disconnected);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn normalize_esp3d_http_endpoint(endpoint: &str) -> Result<String, String> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err("ESP3D endpoint is empty.".to_owned());
+    }
+    let without_websocket_scheme =
+        endpoint.strip_prefix("ws://").or_else(|| endpoint.strip_prefix("wss://"));
+    let with_scheme = if let Some(rest) = without_websocket_scheme {
+        let host_port = rest.split('/').next().unwrap_or(rest).trim_end_matches('/');
+        let http_host = if let Some((host, port)) = host_port.rsplit_once(':') {
+            if port.parse::<u16>().ok() == Some(ESP3D_DEFAULT_DATA_WEBSOCKET_PORT) {
+                host
+            } else {
+                host_port
+            }
+        } else {
+            host_port
+        };
+        format!("http://{http_host}")
+    } else if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_owned()
+    } else {
+        format!("http://{endpoint}")
+    };
+    Ok(with_scheme.trim_end_matches('/').to_owned())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn send_esp3d_http_command(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    command: &str,
+    language: Language,
+) -> Result<Vec<String>, String> {
+    let response = match send_esp3d_http_command_request(client, endpoint, "cmd", command, language)
+    {
+        Ok(response) if response.status().is_success() => response,
+        _ => send_esp3d_http_command_request(client, endpoint, "commandText", command, language)?,
+    };
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("{}: HTTP {status}", language.strings().esp3d_http_request_failed));
+    }
+
+    let body = response
+        .text()
+        .map_err(|error| format!("{}: {error}", language.strings().esp3d_http_request_failed))?;
+    let mut lines: Vec<String> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if lines.is_empty() {
+        lines.push(format!("ESP3D: {command}"));
+    }
+    Ok(lines)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn send_esp3d_http_command_request(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    parameter: &str,
+    command: &str,
+    language: Language,
+) -> Result<reqwest::blocking::Response, String> {
+    let url = format!("{endpoint}/command");
+    client
+        .get(url)
+        .query(&[(parameter, command)])
+        .send()
+        .map_err(|error| format!("{}: {error}", language.strings().esp3d_http_request_failed))
 }
 
 fn parse_firmware(line: &str) -> Option<String> {
@@ -1543,5 +2161,53 @@ mod tests {
     fn builds_absolute_xy_move_command_for_first_point() {
         let command = build_absolute_xy_move_command(12.5, 4.0, 1800.0);
         assert_eq!(command, "G1 X12.50 Y4.00 F1800");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn normalizes_http_esp3d_address_to_data_websocket_port() {
+        assert_eq!(
+            normalize_esp3d_endpoint("http://192.168.0.112/").unwrap(),
+            "ws://192.168.0.112:8282/"
+        );
+        assert_eq!(
+            normalize_esp3d_endpoint("http://192.168.0.112:80/").unwrap(),
+            "ws://192.168.0.112:8282/"
+        );
+        assert_eq!(
+            normalize_esp3d_endpoint("ws://192.168.0.112:8282/").unwrap(),
+            "ws://192.168.0.112:8282/"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn esp3d_completion_survives_batched_ack_frames() {
+        let mut in_flight = VecDeque::from([
+            QueuedLine { line: "M400".to_owned(), source: QueuedLineSource::Manual },
+            QueuedLine { line: "G1 X1".to_owned(), source: QueuedLineSource::Job },
+        ]);
+        let mut in_flight_job_count = 1;
+        let queued_job_count = 0;
+        let mut job_active = true;
+        let mut job_cancelled = false;
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+
+        handle_esp3d_websocket_text(
+            "ok\nok\n",
+            &mut in_flight,
+            &mut in_flight_job_count,
+            &queued_job_count,
+            &mut job_active,
+            &mut job_cancelled,
+            &event_tx,
+            Language::English,
+        )
+        .unwrap();
+
+        assert_eq!(in_flight_job_count, 0);
+        assert!(!job_active);
+        assert!(matches!(event_rx.try_recv(), Ok(WorkerEvent::Line(_))));
+        assert!(matches!(event_rx.try_recv(), Ok(WorkerEvent::JobCompleted)));
     }
 }

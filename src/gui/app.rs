@@ -697,26 +697,68 @@ impl PenarticApp {
 
                         let mut print_start_mode_changed = false;
                         ui.add_enabled_ui(has_device_support, |ui| {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                let can_change_connection_target = matches!(
+                                    self.device.connection_state(),
+                                    ConnectionState::Disconnected
+                                );
+                                let mut use_esp3d = self.device.use_esp3d();
+                                if ui
+                                    .add_enabled(
+                                        can_change_connection_target,
+                                        egui::Checkbox::new(
+                                            &mut use_esp3d,
+                                            text.use_esp3d_connection,
+                                        ),
+                                    )
+                                    .changed()
+                                {
+                                    self.device.set_use_esp3d(use_esp3d);
+                                }
+                                if self.device.use_esp3d() {
+                                    ui.label(text.esp3d_address);
+                                    let mut endpoint = self.device.esp3d_endpoint().to_owned();
+                                    if ui
+                                        .add_enabled(
+                                            can_change_connection_target,
+                                            egui::TextEdit::singleline(&mut endpoint)
+                                                .desired_width(ui.available_width()),
+                                        )
+                                        .changed()
+                                    {
+                                        self.device.set_esp3d_endpoint(endpoint);
+                                    }
+                                }
+                            }
+
                             if ui.button(text.refresh_ports).clicked() {
                                 self.device.refresh_ports();
                             }
 
-                            let ports = self.device.ports().to_vec();
-                            let combo_width = ui.available_width();
-                            egui::ComboBox::from_id_salt("serial-port-combo")
-                                .width(combo_width)
-                                .selected_text(
-                                    self.device.selected_port().unwrap_or(text.select_port),
-                                )
-                                .show_ui(ui, |ui| {
-                                    for port in ports {
-                                        let selected =
-                                            self.device.selected_port() == Some(port.as_str());
-                                        if ui.selectable_label(selected, &port).clicked() {
-                                            self.device.set_selected_port(Some(port.clone()));
+                            #[cfg(not(target_arch = "wasm32"))]
+                            let show_serial_ports = !self.device.use_esp3d();
+                            #[cfg(target_arch = "wasm32")]
+                            let show_serial_ports = true;
+
+                            if show_serial_ports {
+                                let ports = self.device.ports().to_vec();
+                                let combo_width = ui.available_width();
+                                egui::ComboBox::from_id_salt("serial-port-combo")
+                                    .width(combo_width)
+                                    .selected_text(
+                                        self.device.selected_port().unwrap_or(text.select_port),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for port in ports {
+                                            let selected =
+                                                self.device.selected_port() == Some(port.as_str());
+                                            if ui.selectable_label(selected, &port).clicked() {
+                                                self.device.set_selected_port(Some(port.clone()));
+                                            }
                                         }
-                                    }
-                                });
+                                    });
+                            }
 
                             let can_connect = matches!(
                                 self.device.connection_state(),

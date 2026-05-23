@@ -108,9 +108,16 @@ updated with the same value to avoid WGPU validation errors.
 ## 6. Device integration
 
 - serial support uses `serialport` on native builds and the browser Web Serial API on web builds
+- native builds can alternatively connect through ESP3D over the Data WebSocket using the `arduino`
+  subprotocol; `http://192.168.0.112/` is the default UI address and resolves to
+  `ws://192.168.0.112:8282/`, while explicit `ws://...` addresses are used as-is; if the Data
+  WebSocket is not enabled or rejects the `arduino` subprotocol, the worker falls back to the
+  HTTP `/command` endpoint so ESP3D remains usable
 - the device controller keeps the app usable when no port is available
 - firmware/build-volume probing is intentionally best-effort because printer responses vary by firmware
-- native connection probing sends `M115`, `M503`, and `M211`; web connection probing starts with
+- native serial connection probing sends `M115`, `M503`, and `M211`; native ESP3D probing sends the
+  same probe commands through the WebSocket queue after the socket opens;
+  web connection probing starts with
   `M115` for readiness and then accepts the same firmware/build-volume response parsing while the
   serial stream is active; Marlin `M211` `Min:`/`Max:` reports are used to detect printable width and height when `M503` does not include build volume
 - if device probing fails, the manually configured printable area remains authoritative
@@ -121,6 +128,10 @@ updated with the same value to avoid WGPU validation errors.
 - direct jog/home controls send synchronized metric movement commands for XY and Z when no print job is active
 - dedicated positioning commands can move to the first drawing start point, current timeline preview position, or any placed SVG bounding-box corner without starting the whole job
 - the serial worker strips comments before transmission, sends one G-code line per firmware acknowledgement for conservative USB/firmware buffer handling, and never treats read timeouts as acknowledgements
+- the ESP3D WebSocket worker strips comments through the shared queue, keeps a small bounded
+  in-flight window so the firmware planner stays fed despite Wi-Fi/WebSocket latency, tops that
+  window up in small increments instead of refilling it in one large burst, handles ESP3D binary text
+  frames, and sends `M410`/`M400` immediately when stopping a job
 - web serial streaming follows the same comment stripping, ACK tracking, stop, jog/home, and bounded
   one-line in-flight behavior as the native worker; it requires a browser with Web Serial support, a secure
   context, and the user's explicit port selection
