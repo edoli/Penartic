@@ -16,8 +16,8 @@ use crate::{
     plot::{
         gcode,
         model::{
-            CurveOutputMode, PrintStartMode, PrintableArea, SvgPlacement, ToolSettings,
-            ToolpathPlan,
+            CurveOutputMode, FillPattern, PrintStartMode, PrintableArea, SvgPlacement,
+            ToolSettings, ToolpathPlan,
         },
     },
     res::{
@@ -1031,6 +1031,51 @@ impl PenarticApp {
                             ui.small(text.corner_rounding_hint);
                         }
 
+                        if ui
+                            .checkbox(&mut self.settings.fill_enabled, text.fill_closed_shapes)
+                            .changed()
+                        {
+                            settings_changed = true;
+                        }
+                        if self.settings.fill_enabled {
+                            let previous_pattern = self.settings.fill_pattern;
+                            egui::ComboBox::from_id_salt("fill-pattern-combo")
+                                .selected_text(fill_pattern_label(self.settings.fill_pattern, text))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.settings.fill_pattern,
+                                        FillPattern::Lines,
+                                        text.fill_pattern_lines,
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.settings.fill_pattern,
+                                        FillPattern::Crosshatch,
+                                        text.fill_pattern_crosshatch,
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.settings.fill_pattern,
+                                        FillPattern::Zigzag,
+                                        text.fill_pattern_zigzag,
+                                    );
+                                });
+                            settings_changed |= previous_pattern != self.settings.fill_pattern;
+                            settings_changed |= drag_value_row(
+                                ui,
+                                text.fill_density,
+                                &mut self.settings.fill_density_percent,
+                                1.0,
+                                1.0..=100.0,
+                            );
+                            settings_changed |= drag_value_row(
+                                ui,
+                                text.fill_angle,
+                                &mut self.settings.fill_angle_degrees,
+                                1.0,
+                                0.0..=179.0,
+                            );
+                            ui.small(text.fill_density_hint);
+                        }
+
                         if settings_changed || print_start_mode_changed {
                             self.rebuild_toolpath();
                         }
@@ -1722,6 +1767,7 @@ fn combine_prepared_svgs(
 ) -> paths::PreparedSvg {
     let mut source_names = Vec::new();
     let mut strokes = Vec::new();
+    let mut fill_regions = Vec::new();
     let mut warnings = Vec::new();
     let mut min = glam::Vec2::splat(f32::INFINITY);
     let mut max = glam::Vec2::splat(f32::NEG_INFINITY);
@@ -1734,6 +1780,7 @@ fn combine_prepared_svgs(
         max = max.max(prepared.drawing_origin + prepared.drawing_bounds);
         is_out_of_bounds |= prepared.is_out_of_bounds;
         strokes.extend(prepared.strokes);
+        fill_regions.extend(prepared.fill_regions);
     }
 
     if !min.is_finite() || !max.is_finite() {
@@ -1749,6 +1796,7 @@ fn combine_prepared_svgs(
     paths::PreparedSvg {
         source_name: source_names.join(", "),
         strokes,
+        fill_regions,
         warnings,
         drawing_origin: min,
         drawing_bounds: max - min,
@@ -1781,6 +1829,14 @@ fn bounds_corner_button(
         .unwrap_or_else(|| language.strings().load_svg_to_use_control.to_owned());
     ui.add_enabled(enabled, egui::Button::new(label).min_size(egui::vec2(48.0, 24.0)))
         .on_hover_text(tooltip)
+}
+
+fn fill_pattern_label(pattern: FillPattern, text: &Strings) -> &'static str {
+    match pattern {
+        FillPattern::Lines => text.fill_pattern_lines,
+        FillPattern::Crosshatch => text.fill_pattern_crosshatch,
+        FillPattern::Zigzag => text.fill_pattern_zigzag,
+    }
 }
 
 fn is_svg_dropped_file(file: &egui::DroppedFile) -> bool {

@@ -3,10 +3,10 @@ use std::f32::consts::TAU;
 use glam::{Vec2, vec2, vec3};
 
 use crate::{
-    paths::{CubicBezierSegment, PreparedSvg, Segment, Stroke},
+    paths::{CubicBezierSegment, FillRegion, FillRule, PreparedSvg, Segment, Stroke},
     plot::model::{
-        CurveOutputMode, MotionKind, MotionSegment, PrintStartMode, ToolSettings, ToolpathPlan,
-        ToolpathStats,
+        CurveOutputMode, FillPattern, MotionKind, MotionSegment, PrintStartMode, ToolSettings,
+        ToolpathPlan, ToolpathStats,
     },
     res::lang::Language,
 };
@@ -20,6 +20,8 @@ const ARC_RADIUS_TOLERANCE_MM: f32 = 0.05;
 const ARC_RADIUS_TOLERANCE_RATIO: f32 = 0.005;
 const ARC_DETECTION_TANGENT_MIN_DOT: f32 = 0.98;
 const MIN_DETECTABLE_ARC_SWEEP_RAD: f32 = 0.05;
+const MIN_FILL_SPACING_MM: f32 = 0.6;
+const MAX_FILL_SPACING_MM: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy)]
 enum DrawPrimitive {
@@ -209,13 +211,22 @@ pub fn build_plan_with_language(
     let PreparedSvg {
         source_name,
         strokes,
+        fill_regions,
         warnings,
         drawing_origin,
         drawing_bounds,
         is_out_of_bounds,
     } = prepared;
 
-    let stroke_primitives = strokes
+    let mut drawable_strokes = Vec::new();
+    if settings.fill_enabled {
+        for region in &fill_regions {
+            drawable_strokes.extend(generate_fill_strokes(region, settings));
+        }
+    }
+    drawable_strokes.extend(strokes);
+
+    let stroke_primitives = drawable_strokes
         .iter()
         .map(|stroke| build_draw_primitives(stroke, settings))
         .filter(|primitives| !primitives.is_empty())
@@ -354,6 +365,162 @@ pub fn build_plan_with_language(
         gcode_lines,
         warnings,
         stats,
+    }
+}
+
+fn generate_fill_strokes(region: &FillRegion, settings: &ToolSettings) -> Vec<Stroke> {
+    if region.is_empty() || settings.fill_density_percent <= 0.0 {
+        return Vec::new();
+    }
+
+    match settings.fill_pattern {
+        FillPattern::Lines => {
+            fill_hatch_strokes(region, settings.fill_angle_degrees, settings, false)
+        }
+        FillPattern::Crosshatch => {
+            let mut strokes =
+                fill_hatch_strokes(region, settings.fill_angle_degrees, settings, false);
+            strokes.extend(fill_hatch_strokes(
+                region,
+                settings.fill_angle_degrees + 90.0,
+                settings,
+                false,
+            ));
+            strokes
+        }
+        FillPattern::Zigzag => {
+            fill_hatch_strokes(region, settings.fill_angle_degrees, settings, true)
+        }
+    }
+}
+
+fn fill_hatch_strokes(
+    region: &FillRegion,
+    angle_degrees: f32,
+    settings: &ToolSettings,
+    alternate_direction: bool,
+) -> Vec<Stroke> {
+    let contours = region
+        .contours
+        .iter()
+        .map(|stroke| closed_polyline(stroke.flatten_points()))
+        .filter(|points| points.len() >= 4)
+        .collect::<Vec<_>>();
+    if contours.is_empty() {
+        return Vec::new();
+    }
+
+    let angle = angle_degrees.to_radians();
+    let direction = vec2(angle.cos(), angle.sin()).normalize_or_zero();
+    let normal = vec2(-direction.y, direction.x);
+    let spacing = fill_spacing_mm(settings.fill_density_percent);
+    let mut min_offset = f32::INFINITY;
+    let mut max_offset = f32::NEG_INFINITY;
+
+    for point in contours.iter().flatten() {
+        let offset = point.dot(normal);
+        min_offset = min_offset.min(offset);
+        max_offset = max_offset.max(offset);
+    }
+
+    if !min_offset.is_finite() || !max_offset.is_finite() {
+        return Vec::new();
+    }
+
+    let mut strokes = Vec::new();
+    let mut row = 0usize;
+    let mut offset = (min_offset / spacing).floor() * spacing;
+    while offset <= max_offset + spacing * 0.5 {
+        let mut intervals =
+            fill_intervals_at_offset(&contours, region.rule, direction, normal, offset);
+        intervals.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if alternate_direction && row % 2 == 1 {
+            intervals.reverse();
+        }
+
+        for (a, b) in intervals {
+            if b - a <= CORNER_EPSILON {
+                continue;
+            }
+            let (start_projection, end_projection) =
+                if alternate_direction && row % 2 == 1 { (b, a) } else { (a, b) };
+            let start = direction * start_projection + normal * offset;
+            let end = direction * end_projection + normal * offset;
+            strokes.push(Stroke::new(vec![Segment::line(start, end)]));
+        }
+
+        row += 1;
+        offset += spacing;
+    }
+
+    strokes
+}
+
+fn fill_spacing_mm(density_percent: f32) -> f32 {
+    let density = (density_percent.clamp(1.0, 100.0) - 1.0) / 99.0;
+    MAX_FILL_SPACING_MM + (MIN_FILL_SPACING_MM - MAX_FILL_SPACING_MM) * density
+}
+
+fn closed_polyline(mut points: Vec<Vec2>) -> Vec<Vec2> {
+    if points.len() >= 2 && !points_match(points[0], *points.last().unwrap()) {
+        points.push(points[0]);
+    }
+    points
+}
+
+fn fill_intervals_at_offset(
+    contours: &[Vec<Vec2>],
+    rule: FillRule,
+    direction: Vec2,
+    normal: Vec2,
+    offset: f32,
+) -> Vec<(f32, f32)> {
+    let mut events = Vec::new();
+    for contour in contours {
+        for edge in contour.windows(2) {
+            let a_offset = edge[0].dot(normal) - offset;
+            let b_offset = edge[1].dot(normal) - offset;
+            if (a_offset <= 0.0 && b_offset <= 0.0) || (a_offset > 0.0 && b_offset > 0.0) {
+                continue;
+            }
+            let denominator = a_offset - b_offset;
+            if denominator.abs() <= CORNER_EPSILON {
+                continue;
+            }
+            let t = (a_offset / denominator).clamp(0.0, 1.0);
+            let point = edge[0].lerp(edge[1], t);
+            let winding_delta = if b_offset > a_offset { 1 } else { -1 };
+            events.push((point.dot(direction), winding_delta));
+        }
+    }
+
+    events.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut intervals = Vec::new();
+    let mut winding = 0i32;
+    let mut active_start = None;
+
+    for (projection, delta) in events {
+        let was_inside = fill_rule_inside(rule, winding);
+        winding += delta;
+        let is_inside = fill_rule_inside(rule, winding);
+        match (was_inside, is_inside, active_start) {
+            (false, true, None) => active_start = Some(projection),
+            (true, false, Some(start)) if projection > start + CORNER_EPSILON => {
+                intervals.push((start, projection));
+                active_start = None;
+            }
+            (true, false, _) => active_start = None,
+            _ => {}
+        }
+    }
+
+    intervals
+}
+
+fn fill_rule_inside(rule: FillRule, winding: i32) -> bool {
+    match rule {
+        FillRule::NonZero => winding != 0,
+        FillRule::EvenOdd => winding.rem_euclid(2) != 0,
     }
 }
 
@@ -891,12 +1058,14 @@ mod tests {
     use glam::vec2;
 
     use super::*;
+    use crate::paths::{FillRegion, FillRule};
     use crate::plot::model::{CurveOutputMode, PrintStartMode, PrintableArea, ToolSettings};
 
     fn line_prepared_svg() -> PreparedSvg {
         PreparedSvg {
             source_name: "shape.svg".to_owned(),
             strokes: vec![Stroke::new(vec![Segment::line(vec2(10.0, 10.0), vec2(40.0, 10.0))])],
+            fill_regions: Vec::new(),
             warnings: Vec::new(),
             drawing_origin: vec2(10.0, 10.0),
             drawing_bounds: vec2(30.0, 0.0),
@@ -911,6 +1080,7 @@ mod tests {
                 Segment::line(vec2(0.0, 0.0), vec2(10.0, 0.0)),
                 Segment::line(vec2(10.0, 0.0), vec2(10.0, 10.0)),
             ])],
+            fill_regions: Vec::new(),
             warnings: Vec::new(),
             drawing_origin: vec2(0.0, 0.0),
             drawing_bounds: vec2(10.0, 10.0),
@@ -986,6 +1156,7 @@ mod tests {
                 vec2(5.0, 10.0),
                 vec2(10.0, 0.0),
             )])],
+            fill_regions: Vec::new(),
             warnings: Vec::new(),
             drawing_origin: vec2(0.0, 0.0),
             drawing_bounds: vec2(10.0, 10.0),
@@ -1021,6 +1192,7 @@ mod tests {
                 corner_smoothing_enabled: true,
                 corner_smoothing_radius_mm: 1.0,
                 corner_smoothing_angle_deg: 45.0,
+                ..ToolSettings::default()
             },
         );
 
@@ -1037,6 +1209,7 @@ mod tests {
                 Segment::quadratic(vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(10.0, 10.0)),
                 Segment::line(vec2(10.0, 10.0), vec2(20.0, 10.0)),
             ])],
+            fill_regions: Vec::new(),
             warnings: Vec::new(),
             drawing_origin: vec2(0.0, 0.0),
             drawing_bounds: vec2(20.0, 10.0),
@@ -1054,6 +1227,7 @@ mod tests {
                 corner_smoothing_enabled: false,
                 corner_smoothing_radius_mm: 1.0,
                 corner_smoothing_angle_deg: 45.0,
+                ..ToolSettings::default()
             },
         );
         let smoothing_settings = ToolSettings {
@@ -1065,6 +1239,7 @@ mod tests {
             corner_smoothing_enabled: true,
             corner_smoothing_radius_mm: 1.0,
             corner_smoothing_angle_deg: 45.0,
+            ..ToolSettings::default()
         };
         let smoothed_primitives = build_draw_primitives(&prepared.strokes[0], &smoothing_settings);
 
@@ -1088,6 +1263,7 @@ mod tests {
                 Segment::line(vec2(0.0, 0.0), vec2(10.0, 0.0)),
                 Segment::line(vec2(10.0, 0.0), vec2(20.0, 0.0)),
             ])],
+            fill_regions: Vec::new(),
             warnings: Vec::new(),
             drawing_origin: vec2(0.0, 0.0),
             drawing_bounds: vec2(20.0, 0.0),
@@ -1104,5 +1280,39 @@ mod tests {
 
         assert!(draw_lines.iter().any(|line| line.contains(" F")));
         assert!(draw_lines.iter().any(|line| !line.contains(" F")));
+    }
+
+    #[test]
+    fn converts_fill_regions_to_hatch_draw_strokes() {
+        let square = Stroke::new(vec![
+            Segment::line(vec2(0.0, 0.0), vec2(10.0, 0.0)),
+            Segment::line(vec2(10.0, 0.0), vec2(10.0, 10.0)),
+            Segment::line(vec2(10.0, 10.0), vec2(0.0, 10.0)),
+            Segment::line(vec2(0.0, 10.0), vec2(0.0, 0.0)),
+        ]);
+        let prepared = PreparedSvg {
+            source_name: "filled.svg".to_owned(),
+            strokes: Vec::new(),
+            fill_regions: vec![FillRegion::new(vec![square], FillRule::NonZero)],
+            warnings: Vec::new(),
+            drawing_origin: vec2(0.0, 0.0),
+            drawing_bounds: vec2(10.0, 10.0),
+            is_out_of_bounds: false,
+        };
+
+        let plan = build_plan(
+            prepared,
+            &ToolSettings {
+                printable_area: PrintableArea::new(100.0, 100.0),
+                print_start_mode: PrintStartMode::DirectFromCurrentPosition,
+                fill_density_percent: 100.0,
+                fill_angle_degrees: 0.0,
+                ..ToolSettings::default()
+            },
+        );
+
+        assert!(plan.stats.stroke_count > 1);
+        assert!(plan.stats.drawing_distance_mm > 10.0);
+        assert!(plan.gcode_lines.iter().any(|line| line.starts_with("G1 X")));
     }
 }

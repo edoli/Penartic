@@ -12,6 +12,36 @@ const SEGMENT_EPSILON: f32 = 1e-4;
 
 pub type StrokeSegments = Vec<Segment>;
 pub type Strokes = Vec<Stroke>;
+pub type FillRegions = Vec<FillRegion>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillRule {
+    NonZero,
+    EvenOdd,
+}
+
+#[derive(Debug, Clone)]
+pub struct FillRegion {
+    pub contours: Strokes,
+    pub rule: FillRule,
+}
+
+impl FillRegion {
+    pub fn new(contours: impl Into<Strokes>, rule: FillRule) -> Self {
+        Self { contours: contours.into(), rule }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.contours.is_empty() || self.contours.iter().all(Stroke::is_empty)
+    }
+
+    pub fn transformed(&self, map: impl Fn(Vec2) -> Vec2 + Copy) -> Self {
+        Self {
+            contours: self.contours.iter().map(|stroke| stroke.transformed(map)).collect(),
+            rule: self.rule,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Stroke {
@@ -41,6 +71,19 @@ impl Stroke {
 
     pub fn approximate_length(&self) -> f32 {
         self.segments.iter().map(Segment::approximate_length).sum()
+    }
+
+    pub fn flatten_points(&self) -> Vec<Vec2> {
+        let Some(first_segment) = self.segments.first() else {
+            return Vec::new();
+        };
+
+        let mut points = vec![first_segment.start_point()];
+        for segment in &self.segments {
+            let segment_points = segment.flatten_points();
+            points.extend(segment_points.into_iter().skip(1));
+        }
+        simplify_polyline(&points)
     }
 
     pub fn merge_short_segments(
@@ -600,7 +643,6 @@ fn polyline_length(points: &[Vec2]) -> f32 {
     points.windows(2).map(|segment| segment[0].distance(segment[1])).sum()
 }
 
-#[cfg(test)]
 pub fn simplify_polyline(polyline: &[Vec2]) -> Vec<Vec2> {
     if polyline.len() <= 2 {
         return polyline.to_vec();
@@ -628,7 +670,6 @@ pub fn simplify_polyline(polyline: &[Vec2]) -> Vec<Vec2> {
     simplified
 }
 
-#[cfg(test)]
 fn is_mergeable_collinear_triplet(a: Vec2, b: Vec2, c: Vec2) -> bool {
     let ab = b - a;
     let bc = c - b;
@@ -645,7 +686,6 @@ fn is_mergeable_collinear_triplet(a: Vec2, b: Vec2, c: Vec2) -> bool {
     direction_match && deviation_sq <= 0.05_f32.powi(2)
 }
 
-#[cfg(test)]
 fn point_to_segment_distance_sq(point: Vec2, start: Vec2, end: Vec2) -> f32 {
     let segment = end - start;
     let length_sq = segment.length_squared();
@@ -660,16 +700,7 @@ fn point_to_segment_distance_sq(point: Vec2, start: Vec2, end: Vec2) -> f32 {
 
 #[cfg(test)]
 pub fn flatten_stroke_to_polyline(stroke: &Stroke) -> Vec<Vec2> {
-    let Some(first_segment) = stroke.segments.first() else {
-        return Vec::new();
-    };
-
-    let mut points = vec![first_segment.start_point()];
-    for segment in &stroke.segments {
-        let segment_points = segment.flatten_points();
-        points.extend(segment_points.into_iter().skip(1));
-    }
-    simplify_polyline(&points)
+    stroke.flatten_points()
 }
 
 #[cfg(test)]

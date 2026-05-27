@@ -63,6 +63,18 @@ fn default_corner_smoothing_angle_deg() -> f32 {
     45.0
 }
 
+fn default_fill_enabled() -> bool {
+    true
+}
+
+fn default_fill_density_percent() -> f32 {
+    35.0
+}
+
+fn default_fill_angle_degrees() -> f32 {
+    45.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSettings {
     pub printable_area: PrintableArea,
@@ -78,6 +90,14 @@ pub struct ToolSettings {
     pub corner_smoothing_radius_mm: f32,
     #[serde(default = "default_corner_smoothing_angle_deg")]
     pub corner_smoothing_angle_deg: f32,
+    #[serde(default = "default_fill_enabled")]
+    pub fill_enabled: bool,
+    #[serde(default)]
+    pub fill_pattern: FillPattern,
+    #[serde(default = "default_fill_density_percent")]
+    pub fill_density_percent: f32,
+    #[serde(default = "default_fill_angle_degrees")]
+    pub fill_angle_degrees: f32,
 }
 
 impl ToolSettings {
@@ -88,6 +108,8 @@ impl ToolSettings {
         self.lift_height_mm = self.lift_height_mm.clamp(0.1, 25.0);
         self.corner_smoothing_radius_mm = self.corner_smoothing_radius_mm.clamp(0.1, 10.0);
         self.corner_smoothing_angle_deg = self.corner_smoothing_angle_deg.clamp(5.0, 170.0);
+        self.fill_density_percent = self.fill_density_percent.clamp(1.0, 100.0);
+        self.fill_angle_degrees = self.fill_angle_degrees.rem_euclid(180.0);
     }
 
     pub fn print_feed_rate(&self) -> f32 {
@@ -110,8 +132,21 @@ impl Default for ToolSettings {
             corner_smoothing_enabled: default_corner_smoothing_enabled(),
             corner_smoothing_radius_mm: default_corner_smoothing_radius_mm(),
             corner_smoothing_angle_deg: default_corner_smoothing_angle_deg(),
+            fill_enabled: default_fill_enabled(),
+            fill_pattern: FillPattern::default(),
+            fill_density_percent: default_fill_density_percent(),
+            fill_angle_degrees: default_fill_angle_degrees(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FillPattern {
+    #[default]
+    Lines,
+    Crosshatch,
+    Zigzag,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

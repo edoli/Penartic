@@ -7,7 +7,9 @@ use crate::{
     res::lang::Language,
 };
 
-use super::ir::{DashPattern, Segment, Stroke, StrokeSegments, Strokes};
+use super::ir::{
+    DashPattern, FillRegion, FillRegions, FillRule, Segment, Stroke, StrokeSegments, Strokes,
+};
 use super::stroke_processing::{normalize_strokes, stroke_bounds};
 
 const OUT_OF_BOUNDS_TOLERANCE_MM: f32 = 0.01;
@@ -19,6 +21,7 @@ const MAX_STROKE_JOIN_GAP_MM: f32 = 0.5;
 pub struct PreparedSvg {
     pub source_name: String,
     pub strokes: Strokes,
+    pub fill_regions: FillRegions,
     pub warnings: Vec<String>,
     pub drawing_origin: Vec2,
     pub drawing_bounds: Vec2,
@@ -29,6 +32,7 @@ pub struct PreparedSvg {
 pub struct ParsedSvg {
     pub source_name: String,
     strokes: Strokes,
+    fill_regions: FillRegions,
     pub warnings: Vec<String>,
     bounds: SourceBounds,
 }
@@ -98,16 +102,23 @@ pub fn parse_svg_with_language(
     let source_name = source_name.into();
     let tree = Tree::from_data(bytes, &Options::default())?;
     let mut raw_strokes = Vec::new();
+    let mut raw_fill_regions = Vec::new();
     let mut warning_flags = WarningFlags::default();
 
-    collect_group(tree.root(), &mut raw_strokes, &mut warning_flags);
+    collect_group(tree.root(), &mut raw_strokes, &mut raw_fill_regions, &mut warning_flags);
 
     raw_strokes.retain(|stroke| !stroke.stroke.is_empty());
-    if raw_strokes.is_empty() {
+    raw_fill_regions.retain(|region| !region.is_empty());
+    if raw_strokes.is_empty() && raw_fill_regions.is_empty() {
         return Err(SvgParserError::NoPaths);
     }
 
-    let Some((min, max)) = stroke_bounds(raw_strokes.iter().map(|raw| &raw.stroke)) else {
+    let Some((min, max)) = stroke_bounds(
+        raw_strokes
+            .iter()
+            .map(|raw| &raw.stroke)
+            .chain(raw_fill_regions.iter().flat_map(|region| region.contours.iter())),
+    ) else {
         return Err(SvgParserError::NoPaths);
     };
     let source_size = max - min;
@@ -126,11 +137,12 @@ pub fn parse_svg_with_language(
         MIN_STROKE_LENGTH_MM,
         MAX_STROKE_JOIN_GAP_MM,
     );
-    if strokes.is_empty() {
+    let fill_regions = fill_regions_in_source_drawing_space(&raw_fill_regions, bounds);
+    if strokes.is_empty() && fill_regions.is_empty() {
         return Err(SvgParserError::NoPaths);
     }
 
-    Ok(ParsedSvg { source_name, strokes, warnings, bounds })
+    Ok(ParsedSvg { source_name, strokes, fill_regions, warnings, bounds })
 }
 
 pub fn prepare_svg(
@@ -151,13 +163,18 @@ pub fn prepare_svg(
         rotated + placement.center_mm
     };
     let strokes: Strokes = parsed.strokes.iter().map(|stroke| stroke.transformed(map)).collect();
-    let (drawing_origin, drawing_max) =
-        stroke_bounds(strokes.iter()).unwrap_or((placement.center_mm, placement.center_mm));
+    let fill_regions: FillRegions =
+        parsed.fill_regions.iter().map(|region| region.transformed(map)).collect();
+    let (drawing_origin, drawing_max) = stroke_bounds(
+        strokes.iter().chain(fill_regions.iter().flat_map(|region| region.contours.iter())),
+    )
+    .unwrap_or((placement.center_mm, placement.center_mm));
     let drawing_bounds = drawing_max - drawing_origin;
 
     PreparedSvg {
         source_name: parsed.source_name.clone(),
         strokes,
+        fill_regions,
         warnings: parsed.warnings.clone(),
         drawing_origin,
         drawing_bounds,
@@ -181,15 +198,47 @@ fn strokes_in_source_drawing_space(raw_strokes: &[RawStroke], bounds: SourceBoun
     strokes
 }
 
-fn collect_group(group: &usvg::Group, strokes: &mut Vec<RawStroke>, flags: &mut WarningFlags) {
+fn fill_regions_in_source_drawing_space(
+    raw_regions: &[FillRegion],
+    bounds: SourceBounds,
+) -> FillRegions {
+    let map = |point: Vec2| vec2(point.x - bounds.min.x, bounds.max.y - point.y);
+    raw_regions.iter().map(|region| region.transformed(map)).collect()
+}
+
+fn collect_group(
+    group: &usvg::Group,
+    strokes: &mut Vec<RawStroke>,
+    fill_regions: &mut FillRegions,
+    flags: &mut WarningFlags,
+) {
     for node in group.children() {
         match node {
-            Node::Group(group) => collect_group(group, strokes, flags),
+            Node::Group(group) => collect_group(group, strokes, fill_regions, flags),
             Node::Path(path) if path.is_visible() => {
                 let dash_pattern = path
                     .stroke()
                     .and_then(|stroke| DashPattern::new(stroke.dasharray()?, stroke.dashoffset()));
-                for stroke in sample_path(path) {
+                let sampled = sample_path(path);
+                if path.fill().is_some() {
+                    let contours = sampled
+                        .iter()
+                        .filter(|stroke| is_closed_stroke(stroke))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !contours.is_empty() {
+                        fill_regions.push(FillRegion::new(
+                            contours,
+                            path.fill()
+                                .map(|fill| svg_fill_rule(fill.rule()))
+                                .unwrap_or(FillRule::NonZero),
+                        ));
+                    }
+                }
+                if path.stroke().is_none() && sampled.iter().all(is_closed_stroke) {
+                    continue;
+                }
+                for stroke in sampled {
                     strokes.push(RawStroke { stroke, dash_pattern: dash_pattern.clone() });
                 }
             }
@@ -197,6 +246,23 @@ fn collect_group(group: &usvg::Group, strokes: &mut Vec<RawStroke>, flags: &mut 
             Node::Text(_) => flags.saw_text = true,
             _ => {}
         }
+    }
+}
+
+fn is_closed_stroke(stroke: &Stroke) -> bool {
+    let Some(start) = stroke.start_point() else {
+        return false;
+    };
+    let Some(end) = stroke.end_point() else {
+        return false;
+    };
+    start.distance_squared(end) <= 1e-4
+}
+
+fn svg_fill_rule(rule: usvg::FillRule) -> FillRule {
+    match rule {
+        usvg::FillRule::NonZero => FillRule::NonZero,
+        usvg::FillRule::EvenOdd => FillRule::EvenOdd,
     }
 }
 
@@ -403,6 +469,24 @@ mod tests {
         assert!((first.last().unwrap().x - 58.0).abs() < 0.05);
         assert!((second.first().unwrap().x - 60.0).abs() < 0.05);
         assert!((second.last().unwrap().x - 64.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn captures_filled_closed_paths_as_fill_regions() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+                <path d="M 0 0 L 10 0 L 10 10 L 0 10 Z" fill="black" />
+            </svg>
+        "#;
+
+        let parsed = parse_svg("filled.svg", svg).unwrap();
+        let printable_area = PrintableArea::new(100.0, 60.0);
+        let prepared =
+            prepare_svg(&parsed, parsed.centered_native_placement(printable_area), printable_area);
+
+        assert_eq!(parsed.strokes.len(), 0);
+        assert_eq!(prepared.fill_regions.len(), 1);
+        assert_eq!(prepared.fill_regions[0].contours.len(), 1);
     }
 
     #[test]
