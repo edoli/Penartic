@@ -604,6 +604,11 @@ impl PenarticApp {
             }
         });
 
+        if ui.add_enabled(can_control, egui::Button::new(text.motors_off)).clicked() {
+            let result = self.device.motors_off();
+            self.apply_device_action(result);
+        }
+
         if !can_control {
             ui.small(text.manual_control_unavailable);
         }

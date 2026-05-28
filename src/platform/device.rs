@@ -521,6 +521,10 @@ impl DeviceController {
         )
     }
 
+    pub fn motors_off(&mut self) -> Result<(), String> {
+        self.queue_manual_commands(self.text().sent_motors_off, build_motors_off_commands())
+    }
+
     pub fn move_to_first_start(
         &mut self,
         x_mm: f32,
@@ -1743,6 +1747,10 @@ fn build_absolute_xy_move_commands(x_mm: f32, y_mm: f32, feed_rate_mm_min: f32) 
     ]
 }
 
+fn build_motors_off_commands() -> Vec<String> {
+    vec!["M400".to_owned(), "M84".to_owned()]
+}
+
 fn extract_axis_value(line: &str, axis: char) -> Option<f32> {
     let bytes = line.as_bytes();
     let axis = axis as u8;
@@ -2659,6 +2667,11 @@ mod tests {
                 "M400".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn builds_motors_off_sequence() {
+        assert_eq!(build_motors_off_commands(), vec!["M400".to_owned(), "M84".to_owned()]);
     }
 
     #[test]
