@@ -1190,7 +1190,7 @@ fn handle_esp3d_websocket_text(
     language: Language,
 ) -> Result<(), String> {
     for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        if is_ack_line(line) {
+        for _ in 0..ack_response_count(line) {
             acknowledge_queued_line(
                 in_flight_lines,
                 in_flight_job_count,
@@ -1528,6 +1528,36 @@ fn parse_firmware(line: &str) -> Option<String> {
 fn is_ack_line(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     lower == "ok" || lower.starts_with("ok ")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ack_response_count(text: &str) -> usize {
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut index = 0usize;
+    let mut count = 0usize;
+
+    while index + 1 < bytes.len() {
+        if bytes[index] != b'o' || bytes[index + 1] != b'k' {
+            index += 1;
+            continue;
+        }
+
+        let before_boundary = index == 0
+            || !bytes[index - 1].is_ascii_alphanumeric()
+            || (index >= 2 && bytes[index - 2] == b'o' && bytes[index - 1] == b'k');
+        let after = bytes.get(index + 2).copied();
+        let after_boundary = after.is_none_or(|byte| !byte.is_ascii_alphanumeric() || byte == b'o');
+
+        if before_boundary && after_boundary {
+            count += 1;
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+
+    count
 }
 
 fn is_ready_line(line: &str) -> bool {
@@ -2209,5 +2239,46 @@ mod tests {
         assert!(!job_active);
         assert!(matches!(event_rx.try_recv(), Ok(WorkerEvent::Line(_))));
         assert!(matches!(event_rx.try_recv(), Ok(WorkerEvent::JobCompleted)));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn esp3d_completion_handles_compacted_ack_frame() {
+        let mut in_flight = VecDeque::from([
+            QueuedLine { line: "G1 X1".to_owned(), source: QueuedLineSource::Job },
+            QueuedLine { line: "M400".to_owned(), source: QueuedLineSource::Job },
+        ]);
+        let mut in_flight_job_count = 2;
+        let queued_job_count = 0;
+        let mut job_active = true;
+        let mut job_cancelled = false;
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+
+        handle_esp3d_websocket_text(
+            "okok",
+            &mut in_flight,
+            &mut in_flight_job_count,
+            &queued_job_count,
+            &mut job_active,
+            &mut job_cancelled,
+            &event_tx,
+            Language::English,
+        )
+        .unwrap();
+
+        assert_eq!(in_flight_job_count, 0);
+        assert!(!job_active);
+        assert!(matches!(event_rx.try_recv(), Ok(WorkerEvent::JobCompleted)));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn counts_esp3d_ack_responses_without_matching_words() {
+        assert_eq!(ack_response_count("ok"), 1);
+        assert_eq!(ack_response_count("ok N0 P15 B15"), 1);
+        assert_eq!(ack_response_count("okok"), 2);
+        assert_eq!(ack_response_count("ok\r\nok"), 2);
+        assert_eq!(ack_response_count("look"), 0);
+        assert_eq!(ack_response_count("okay"), 0);
     }
 }
