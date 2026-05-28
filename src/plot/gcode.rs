@@ -530,7 +530,9 @@ fn build_draw_primitives(stroke: &Stroke, settings: &ToolSettings) -> Vec<DrawPr
         .iter()
         .copied()
         .map(DrawPrimitive::Path)
-        .filter(|primitive| primitive.approximate_length() > CORNER_EPSILON)
+        .filter(|primitive| {
+            primitive_is_finite(*primitive) && primitive.approximate_length() > CORNER_EPSILON
+        })
         .collect::<Vec<_>>();
 
     apply_corner_smoothing(base_primitives, settings)
@@ -947,12 +949,32 @@ fn push_relative_z_motion_if_needed(
     speed_mm_s: f32,
     feed_rate_mm_min: f32,
 ) {
+    if !current.is_finite() {
+        if end.is_finite() {
+            *current = end;
+        }
+        return;
+    }
+    if !end.is_finite() {
+        return;
+    }
+
     if current.distance_squared(end) <= 1e-6 {
         return;
     }
 
-    debug_assert!((current.x - end.x).abs() <= 1e-6);
-    debug_assert!((current.y - end.y).abs() <= 1e-6);
+    if (current.x - end.x).abs() > 1e-6 || (current.y - end.y).abs() > 1e-6 {
+        push_segment(segments, segment_end_times_s, *current, end, MotionKind::Travel, speed_mm_s);
+        gcode_lines.push(format!(
+            "G1 X{:.2} Y{:.2} Z{:.3} F{:.0}",
+            end.x,
+            end.y,
+            end.z,
+            feed_rate_mm_min.round()
+        ));
+        *current = end;
+        return;
+    }
 
     push_segment(segments, segment_end_times_s, *current, end, MotionKind::Travel, speed_mm_s);
     gcode_lines.push("G91".to_owned());
@@ -988,6 +1010,26 @@ fn push_g1_move(
     }
 
     gcode_lines.push(line);
+}
+
+fn primitive_is_finite(primitive: DrawPrimitive) -> bool {
+    match primitive {
+        DrawPrimitive::Path(segment) => match segment {
+            Segment::Line(segment) => segment.start.is_finite() && segment.end.is_finite(),
+            Segment::Quadratic(segment) => {
+                segment.start.is_finite() && segment.control.is_finite() && segment.end.is_finite()
+            }
+            Segment::Cubic(segment) => {
+                segment.start.is_finite()
+                    && segment.control_a.is_finite()
+                    && segment.control_b.is_finite()
+                    && segment.end.is_finite()
+            }
+        },
+        DrawPrimitive::Arc(segment) => {
+            segment.start.is_finite() && segment.end.is_finite() && segment.center.is_finite()
+        }
+    }
 }
 
 fn push_g2g3_move(
@@ -1314,5 +1356,50 @@ mod tests {
         assert!(plan.stats.stroke_count > 1);
         assert!(plan.stats.drawing_distance_mm > 10.0);
         assert!(plan.gcode_lines.iter().any(|line| line.starts_with("G1 X")));
+    }
+
+    #[test]
+    fn z_motion_falls_back_to_absolute_travel_when_xy_differs() {
+        let mut segments = Vec::new();
+        let mut segment_end_times_s = Vec::new();
+        let mut gcode_lines = Vec::new();
+        let mut current = vec3(1.0, 2.0, 3.0);
+
+        push_relative_z_motion_if_needed(
+            &mut segments,
+            &mut segment_end_times_s,
+            &mut gcode_lines,
+            &mut current,
+            vec3(4.0, 5.0, 6.0),
+            10.0,
+            600.0,
+        );
+
+        assert_eq!(current, vec3(4.0, 5.0, 6.0));
+        assert_eq!(gcode_lines, vec!["G1 X4.00 Y5.00 Z6.000 F600"]);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].kind, MotionKind::Travel);
+    }
+
+    #[test]
+    fn z_motion_does_not_emit_non_finite_gcode() {
+        let mut segments = Vec::new();
+        let mut segment_end_times_s = Vec::new();
+        let mut gcode_lines = Vec::new();
+        let mut current = vec3(f32::NAN, 2.0, 3.0);
+
+        push_relative_z_motion_if_needed(
+            &mut segments,
+            &mut segment_end_times_s,
+            &mut gcode_lines,
+            &mut current,
+            vec3(4.0, 5.0, 6.0),
+            10.0,
+            600.0,
+        );
+
+        assert_eq!(current, vec3(4.0, 5.0, 6.0));
+        assert!(segments.is_empty());
+        assert!(gcode_lines.is_empty());
     }
 }
