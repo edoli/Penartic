@@ -27,6 +27,7 @@ pub(super) const STRINGS: Strings = Strings {
     esp3d_http_ready: "ESP3D WebSocket 전송을 사용할 수 있습니다.",
     esp3d_http_connected: "ESP3D WebSocket으로 연결되었습니다.",
     esp3d_http_request_failed: "ESP3D WebSocket 요청 실패",
+    secure_websocket_required: "이 페이지는 HTTPS로 열려 있어 ESP3D는 wss://를 사용해야 하거나 Penartic을 localhost/http로 서빙해야 합니다.",
     select_port: "포트를 선택하세요",
     connect: "연결",
     disconnect: "연결 해제",

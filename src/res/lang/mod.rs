@@ -70,6 +70,7 @@ pub struct Strings {
     pub esp3d_http_ready: &'static str,
     pub esp3d_http_connected: &'static str,
     pub esp3d_http_request_failed: &'static str,
+    pub secure_websocket_required: &'static str,
     pub select_port: &'static str,
     pub connect: &'static str,
     pub disconnect: &'static str,

@@ -7,20 +7,17 @@ use crate::{
 
 #[cfg(target_arch = "wasm32")]
 use {
-    js_sys::{Function, Object, Reflect, Uint8Array},
+    js_sys::{ArrayBuffer, Function, Object, Reflect, Uint8Array},
     std::{cell::RefCell, rc::Rc},
-    wasm_bindgen::{JsCast as _, JsValue},
+    wasm_bindgen::{JsCast as _, JsValue, closure::Closure},
     wasm_bindgen_futures::{JsFuture, spawn_local},
+    web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket},
 };
 
 const DEVICE_LOG_LIMIT: usize = 48;
-#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_ESP3D_ENDPOINT: &str = "http://192.168.0.112/";
-#[cfg(not(target_arch = "wasm32"))]
 const ESP3D_DEFAULT_DATA_WEBSOCKET_PORT: u16 = 8282;
-#[cfg(not(target_arch = "wasm32"))]
 const ESP3D_MAX_IN_FLIGHT_LINES: usize = 32;
-#[cfg(not(target_arch = "wasm32"))]
 const ESP3D_TOP_UP_LINES_PER_TICK: usize = 16;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const MAX_IN_FLIGHT_LINES: usize = 1;
@@ -56,9 +53,7 @@ pub struct DeviceController {
     detected_area: Option<PrintableArea>,
     log: VecDeque<String>,
     last_error: Option<String>,
-    #[cfg(not(target_arch = "wasm32"))]
     use_esp3d: bool,
-    #[cfg(not(target_arch = "wasm32"))]
     esp3d_endpoint: String,
     #[cfg(not(target_arch = "wasm32"))]
     worker: Option<NativeWorker>,
@@ -83,9 +78,7 @@ impl DeviceController {
             detected_area: None,
             log: VecDeque::new(),
             last_error: None,
-            #[cfg(not(target_arch = "wasm32"))]
             use_esp3d: false,
-            #[cfg(not(target_arch = "wasm32"))]
             esp3d_endpoint: DEFAULT_ESP3D_ENDPOINT.to_owned(),
             #[cfg(not(target_arch = "wasm32"))]
             worker: None,
@@ -103,7 +96,6 @@ impl DeviceController {
                     .push(browser_port_selection_label(controller.language).to_owned());
                 controller.push_log(controller.text().web_serial_available);
             } else {
-                controller.connection_state = ConnectionState::Unsupported;
                 controller.push_log(web_serial_unsupported_message(controller.language));
             }
         }
@@ -134,6 +126,7 @@ impl DeviceController {
             self.language,
             web_serial_device_label,
         );
+        relabel_esp3d_target_entry(&mut self.selected_port, previous, self.language);
         for port in &mut self.available_ports {
             relabel_port_value(port, previous, self.language, browser_port_selection_label);
             relabel_port_value(port, previous, self.language, web_serial_device_label);
@@ -144,15 +137,23 @@ impl DeviceController {
         #[cfg(target_arch = "wasm32")]
         {
             self.available_ports.clear();
-            if web_serial_api().is_none() {
-                self.connection_state = ConnectionState::Unsupported;
-                self.selected_port = None;
-                return;
+            if web_serial_api().is_some() {
+                if !self.use_esp3d {
+                    self.selected_port =
+                        Some(browser_port_selection_label(self.language).to_owned());
+                }
+                self.available_ports.push(browser_port_selection_label(self.language).to_owned());
+                self.push_log(self.text().web_serial_choose_port_hint);
+            } else {
+                if !self.use_esp3d {
+                    self.selected_port = None;
+                }
+                self.push_log(web_serial_unsupported_message(self.language));
             }
 
-            self.selected_port = Some(browser_port_selection_label(self.language).to_owned());
-            self.available_ports.push(browser_port_selection_label(self.language).to_owned());
-            self.push_log(self.text().web_serial_choose_port_hint);
+            if self.use_esp3d {
+                self.push_log(self.text().esp3d_http_ready);
+            }
             return;
         }
 
@@ -191,12 +192,10 @@ impl DeviceController {
         self.selected_port = selected_port;
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn use_esp3d(&self) -> bool {
         self.use_esp3d
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_use_esp3d(&mut self, use_esp3d: bool) {
         self.use_esp3d = use_esp3d;
         if use_esp3d {
@@ -210,12 +209,10 @@ impl DeviceController {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn esp3d_endpoint(&self) -> &str {
         &self.esp3d_endpoint
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_esp3d_endpoint(&mut self, endpoint: String) {
         self.esp3d_endpoint = endpoint;
     }
@@ -273,7 +270,11 @@ impl DeviceController {
     pub fn can_connect(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         {
-            self.connection_state == ConnectionState::Disconnected && web_serial_api().is_some()
+            if self.use_esp3d {
+                !self.esp3d_endpoint.trim().is_empty()
+            } else {
+                web_serial_api().is_some()
+            }
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -309,21 +310,33 @@ impl DeviceController {
     pub fn connect(&mut self) -> Result<(), String> {
         #[cfg(target_arch = "wasm32")]
         {
-            if web_serial_api().is_none() {
-                self.connection_state = ConnectionState::Unsupported;
-                return Err(web_serial_unsupported_message(self.language).to_owned());
-            }
+            let target = if self.use_esp3d {
+                WebConnectionTarget::Esp3d { endpoint: self.esp3d_endpoint.trim().to_owned() }
+            } else {
+                if web_serial_api().is_none() {
+                    return Err(web_serial_unsupported_message(self.language).to_owned());
+                }
+                WebConnectionTarget::Serial
+            };
+            let target_label = target.label(self.language);
 
             self.disconnect();
-            let worker = WebWorker::spawn(self.language);
+            let worker = WebWorker::spawn(target, self.language);
             self.worker = Some(worker);
             self.connection_state = ConnectionState::Connecting;
             self.print_state = PrintState::Idle;
             self.last_error = None;
             self.firmware_summary = None;
             self.detected_area = None;
-            self.selected_port = Some(web_serial_device_label(self.language).to_owned());
-            self.push_log(self.text().opening_browser_port_picker);
+            self.selected_port = Some(target_label.clone());
+            if self.use_esp3d {
+                self.push_log(self.text().trying_to_connect(&target_label));
+                if let Some(worker) = self.worker.as_ref() {
+                    worker.queue_command(WorkerCommand::QueueManual(initial_probe_commands()));
+                }
+            } else {
+                self.push_log(self.text().opening_browser_port_picker);
+            }
             Ok(())
         }
 
@@ -356,14 +369,7 @@ impl DeviceController {
             self.selected_port = Some(target_label.clone());
             self.push_log(self.text().trying_to_connect(&target_label));
 
-            if command_tx
-                .send(WorkerCommand::QueueManual(vec![
-                    "M115".to_owned(),
-                    "M503".to_owned(),
-                    "M211".to_owned(),
-                ]))
-                .is_err()
-            {
+            if command_tx.send(WorkerCommand::QueueManual(initial_probe_commands())).is_err() {
                 self.worker = None;
                 self.connection_state = ConnectionState::Disconnected;
                 return Err(self.text().failed_to_start_initial_probe.to_owned());
@@ -563,7 +569,11 @@ impl DeviceController {
             for event in events {
                 match event {
                     WorkerEvent::PortOpened => {
-                        self.push_log(self.text().opened_serial_port_waiting_firmware);
+                        if self.use_esp3d {
+                            self.push_log(self.text().esp3d_http_ready);
+                        } else {
+                            self.push_log(self.text().opened_serial_port_waiting_firmware);
+                        }
                     }
                     WorkerEvent::Connected => {
                         self.connection_state = ConnectionState::Connected;
@@ -754,9 +764,7 @@ impl NativeConnectionTarget {
     fn label(&self, language: Language) -> String {
         match self {
             Self::Serial { port_name } => port_name.clone(),
-            Self::Esp3d { endpoint } => {
-                format!("{}: {}", language.strings().esp3d_device, endpoint)
-            }
+            Self::Esp3d { endpoint } => esp3d_target_label(endpoint, language),
         }
     }
 }
@@ -1306,7 +1314,6 @@ fn esp3d_websocket_available(endpoint: &str, language: Language) -> bool {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn normalize_esp3d_endpoint(endpoint: &str) -> Result<String, String> {
     let endpoint = endpoint.trim();
     if endpoint.is_empty() {
@@ -1530,7 +1537,6 @@ fn is_ack_line(line: &str) -> bool {
     lower == "ok" || lower.starts_with("ok ")
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn ack_response_count(text: &str) -> usize {
     let lower = text.to_ascii_lowercase();
     let bytes = lower.as_bytes();
@@ -1596,6 +1602,14 @@ fn clean_gcode_lines(lines: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+fn initial_probe_commands() -> Vec<String> {
+    vec!["M115".to_owned(), "M503".to_owned(), "M211".to_owned()]
+}
+
+fn esp3d_target_label(endpoint: &str, language: Language) -> String {
+    format!("{}: {endpoint}", language.strings().esp3d_device)
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn browser_port_selection_label(language: Language) -> &'static str {
     language.strings().select_port_in_browser
@@ -1624,6 +1638,20 @@ fn relabel_port_entry(
 ) {
     if let Some(value) = entry.as_mut() {
         relabel_port_value(value, previous, next, label);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn relabel_esp3d_target_entry(entry: &mut Option<String>, previous: Language, next: Language) {
+    let Some(value) = entry.as_mut() else {
+        return;
+    };
+    let previous_prefix = format!("{}: ", previous.strings().esp3d_device);
+    let next_prefix = format!("{}: ", next.strings().esp3d_device);
+    if value.starts_with(&previous_prefix) {
+        *value = format!("{next_prefix}{}", &value[previous_prefix.len()..]);
+    } else if value.starts_with(&next_prefix) {
+        *value = format!("{next_prefix}{}", &value[next_prefix.len()..]);
     }
 }
 
@@ -1791,11 +1819,29 @@ struct WebWorker {
 }
 
 #[cfg(target_arch = "wasm32")]
+enum WebConnectionTarget {
+    Serial,
+    Esp3d { endpoint: String },
+}
+
+#[cfg(target_arch = "wasm32")]
 impl WebWorker {
-    fn spawn(language: Language) -> Self {
+    fn spawn(target: WebConnectionTarget, language: Language) -> Self {
         let commands = WebCommandQueue::default();
         let events = WebEventQueue::default();
-        spawn_local(run_web_worker(commands.clone(), events.clone(), language));
+        match target {
+            WebConnectionTarget::Serial => {
+                spawn_local(run_web_serial_worker(commands.clone(), events.clone(), language));
+            }
+            WebConnectionTarget::Esp3d { endpoint } => {
+                spawn_local(run_websocket_worker(
+                    commands.clone(),
+                    events.clone(),
+                    endpoint,
+                    language,
+                ));
+            }
+        }
         Self { commands, events }
     }
 
@@ -1809,8 +1855,22 @@ impl WebWorker {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn run_web_worker(commands: WebCommandQueue, events: WebEventQueue, language: Language) {
-    let result = run_web_worker_inner(commands, events.clone(), language).await;
+impl WebConnectionTarget {
+    fn label(&self, language: Language) -> String {
+        match self {
+            Self::Serial => web_serial_device_label(language).to_owned(),
+            Self::Esp3d { endpoint } => esp3d_target_label(endpoint, language),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn run_web_serial_worker(
+    commands: WebCommandQueue,
+    events: WebEventQueue,
+    language: Language,
+) {
+    let result = run_web_serial_worker_inner(commands, events.clone(), language).await;
     if let Err(error) = result {
         events.push(WorkerEvent::Error(error));
     }
@@ -1818,7 +1878,7 @@ async fn run_web_worker(commands: WebCommandQueue, events: WebEventQueue, langua
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn run_web_worker_inner(
+async fn run_web_serial_worker_inner(
     commands: WebCommandQueue,
     events: WebEventQueue,
     language: Language,
@@ -1894,6 +1954,7 @@ struct WebSerialState {
     queued_job_count: usize,
     in_flight_lines: VecDeque<QueuedLine>,
     in_flight_job_count: usize,
+    job_active: bool,
     job_cancelled: bool,
     ready: bool,
     disconnect_requested: bool,
@@ -1918,6 +1979,7 @@ impl WebSerialShared {
             queued_job_count: 0,
             in_flight_lines: VecDeque::new(),
             in_flight_job_count: 0,
+            job_active: false,
             job_cancelled: false,
             ready: false,
             disconnect_requested: false,
@@ -1936,26 +1998,30 @@ impl WebSerialShared {
         let mut state = self.0.borrow_mut();
         if !state.ready && is_ready_line(line) {
             state.ready = true;
-            state.queued_lines.extend(["M115", "M503", "M211"].into_iter().map(|line| {
+            state.queued_lines.extend(initial_probe_commands().into_iter().map(|line| {
                 QueuedLine { line: line.to_owned(), source: QueuedLineSource::Manual }
             }));
             state.events.push(WorkerEvent::Connected);
         }
 
         if state.ready && is_ack_line(line) {
-            if let Some(acknowledged) = state.in_flight_lines.pop_front() {
-                if acknowledged.source == QueuedLineSource::Job {
-                    state.in_flight_job_count = state.in_flight_job_count.saturating_sub(1);
-                    if state.queued_job_count == 0 && state.in_flight_job_count == 0 {
-                        state.events.push(if state.job_cancelled {
-                            WorkerEvent::JobCancelled
-                        } else {
-                            WorkerEvent::JobCompleted
-                        });
-                        state.job_cancelled = false;
-                    }
-                }
-            }
+            let queued_job_count = state.queued_job_count;
+            let WebSerialState {
+                in_flight_lines,
+                in_flight_job_count,
+                job_active,
+                job_cancelled,
+                events,
+                ..
+            } = &mut *state;
+            acknowledge_web_queued_line(
+                in_flight_lines,
+                in_flight_job_count,
+                queued_job_count,
+                job_active,
+                job_cancelled,
+                events,
+            );
         }
 
         state.events.push(WorkerEvent::Line(annotate_busy_line(
@@ -1984,6 +2050,7 @@ async fn web_writer_loop(shared: WebSerialShared) {
                     WorkerCommand::QueueJob(lines) => {
                         let lines = clean_gcode_lines(lines);
                         if !lines.is_empty() {
+                            state.job_active = true;
                             state.job_cancelled = false;
                         }
                         state.queued_job_count += lines.len();
@@ -2018,6 +2085,7 @@ async fn web_writer_loop(shared: WebSerialShared) {
                         });
                         if state.in_flight_job_count == 0 {
                             state.events.push(WorkerEvent::JobCancelled);
+                            state.job_active = false;
                             state.job_cancelled = false;
                         }
                     }
@@ -2081,6 +2149,389 @@ async fn web_writer_loop(shared: WebSerialShared) {
 }
 
 #[cfg(target_arch = "wasm32")]
+async fn run_websocket_worker(
+    commands: WebCommandQueue,
+    events: WebEventQueue,
+    endpoint: String,
+    language: Language,
+) {
+    let result = run_websocket_worker_inner(commands, events.clone(), endpoint, language).await;
+    if let Err(error) = result {
+        events.push(WorkerEvent::Error(error));
+    }
+    events.push(WorkerEvent::Disconnected);
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn run_websocket_worker_inner(
+    commands: WebCommandQueue,
+    events: WebEventQueue,
+    endpoint: String,
+    language: Language,
+) -> Result<(), String> {
+    let endpoint = normalize_esp3d_endpoint(&endpoint)?;
+    let socket = WebSocket::new_with_str(&endpoint, "arduino")
+        .map_err(|error| websocket_connect_error(&endpoint, error, language))?;
+    socket.set_binary_type(BinaryType::Arraybuffer);
+
+    let shared = WebSocketShared::new(commands, events, language);
+
+    let open_shared = shared.clone();
+    let open_language = language;
+    let on_open = Closure::wrap(Box::new(move |_event: Event| {
+        let mut state = open_shared.0.borrow_mut();
+        if state.disconnect_requested || state.ready {
+            return;
+        }
+
+        state.ready = true;
+        state.events.push(WorkerEvent::PortOpened);
+        state.events.push(WorkerEvent::Connected);
+        state
+            .events
+            .push(WorkerEvent::Line(open_language.strings().esp3d_http_connected.to_owned()));
+    }) as Box<dyn FnMut(_)>);
+    socket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+
+    let message_shared = shared.clone();
+    let on_message = Closure::wrap(Box::new(move |event: MessageEvent| {
+        if let Some(text) = event.data().as_string() {
+            message_shared.handle_text(&text);
+            return;
+        }
+
+        if let Ok(buffer) = event.data().dyn_into::<ArrayBuffer>() {
+            let bytes = Uint8Array::new(&buffer).to_vec();
+            let text = String::from_utf8_lossy(&bytes);
+            message_shared.handle_text(&text);
+        }
+    }) as Box<dyn FnMut(_)>);
+    socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+
+    let error_shared = shared.clone();
+    let error_language = language;
+    let on_error = Closure::wrap(Box::new(move |_event: Event| {
+        let mut state = error_shared.0.borrow_mut();
+        if state.disconnect_requested {
+            return;
+        }
+
+        state.disconnect_requested = true;
+        state.events.push(WorkerEvent::Error(
+            error_language.strings().esp3d_http_request_failed.to_owned(),
+        ));
+    }) as Box<dyn FnMut(_)>);
+    socket.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+
+    let close_shared = shared.clone();
+    let on_close = Closure::wrap(Box::new(move |_event: CloseEvent| {
+        close_shared.request_disconnect();
+    }) as Box<dyn FnMut(_)>);
+    socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+
+    spawn_local(websocket_writer_loop(shared.clone(), socket.clone()));
+
+    while !shared.disconnect_requested() {
+        delay_ms(10).await;
+    }
+
+    socket.set_onopen(None);
+    socket.set_onmessage(None);
+    socket.set_onerror(None);
+    socket.set_onclose(None);
+    let _ = socket.close();
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+struct WebSocketShared(Rc<RefCell<WebSocketState>>);
+
+#[cfg(target_arch = "wasm32")]
+struct WebSocketState {
+    commands: WebCommandQueue,
+    events: WebEventQueue,
+    language: Language,
+    queued_lines: VecDeque<QueuedLine>,
+    queued_job_count: usize,
+    in_flight_lines: VecDeque<QueuedLine>,
+    in_flight_job_count: usize,
+    job_active: bool,
+    job_cancelled: bool,
+    ready: bool,
+    disconnect_requested: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WebSocketShared {
+    fn new(commands: WebCommandQueue, events: WebEventQueue, language: Language) -> Self {
+        Self(Rc::new(RefCell::new(WebSocketState {
+            commands,
+            events,
+            language,
+            queued_lines: VecDeque::new(),
+            queued_job_count: 0,
+            in_flight_lines: VecDeque::new(),
+            in_flight_job_count: 0,
+            job_active: false,
+            job_cancelled: false,
+            ready: false,
+            disconnect_requested: false,
+        })))
+    }
+
+    fn request_disconnect(&self) {
+        self.0.borrow_mut().disconnect_requested = true;
+    }
+
+    fn disconnect_requested(&self) -> bool {
+        self.0.borrow().disconnect_requested
+    }
+
+    fn handle_text(&self, text: &str) {
+        let mut state = self.0.borrow_mut();
+        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            for _ in 0..ack_response_count(line) {
+                let queued_job_count = state.queued_job_count;
+                let WebSocketState {
+                    in_flight_lines,
+                    in_flight_job_count,
+                    job_active,
+                    job_cancelled,
+                    events,
+                    ..
+                } = &mut *state;
+                acknowledge_web_queued_line(
+                    in_flight_lines,
+                    in_flight_job_count,
+                    queued_job_count,
+                    job_active,
+                    job_cancelled,
+                    events,
+                );
+            }
+
+            state.events.push(WorkerEvent::Line(annotate_busy_line(
+                line.to_owned(),
+                state.in_flight_lines.front(),
+                state.language,
+            )));
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn websocket_writer_loop(shared: WebSocketShared, socket: WebSocket) {
+    loop {
+        if shared.disconnect_requested() {
+            let _ = socket.close();
+            return;
+        }
+
+        let mut send_error = None;
+        {
+            let mut state = shared.0.borrow_mut();
+
+            while send_error.is_none() {
+                let Some(command) = state.commands.pop() else {
+                    break;
+                };
+
+                match command {
+                    WorkerCommand::QueueJob(lines) => {
+                        let lines = clean_gcode_lines(lines);
+                        if !lines.is_empty() {
+                            state.job_active = true;
+                            state.job_cancelled = false;
+                        }
+                        state.queued_job_count += lines.len();
+                        state.queued_lines.extend(
+                            lines
+                                .into_iter()
+                                .map(|line| QueuedLine { line, source: QueuedLineSource::Job }),
+                        );
+                    }
+                    WorkerCommand::QueueManual(lines) => {
+                        state.queued_lines.extend(
+                            clean_gcode_lines(lines)
+                                .into_iter()
+                                .map(|line| QueuedLine { line, source: QueuedLineSource::Manual }),
+                        );
+                    }
+                    WorkerCommand::CancelJob => {
+                        state.job_cancelled = true;
+                        state.queued_lines = state
+                            .queued_lines
+                            .drain(..)
+                            .filter(|queued| queued.source != QueuedLineSource::Job)
+                            .collect();
+                        state.queued_job_count = 0;
+                        if state.ready {
+                            let language = state.language;
+                            let stop_line = QueuedLine {
+                                line: "M410".to_owned(),
+                                source: QueuedLineSource::Stop,
+                            };
+                            if let Err(error) = websocket_send_line(
+                                &socket,
+                                stop_line,
+                                &mut state.in_flight_lines,
+                                language,
+                            ) {
+                                send_error = Some(error);
+                            }
+                            if send_error.is_none() {
+                                let stop_line = QueuedLine {
+                                    line: "M400".to_owned(),
+                                    source: QueuedLineSource::Stop,
+                                };
+                                if let Err(error) = websocket_send_line(
+                                    &socket,
+                                    stop_line,
+                                    &mut state.in_flight_lines,
+                                    language,
+                                ) {
+                                    send_error = Some(error);
+                                }
+                            }
+                        } else {
+                            state.queued_lines.push_front(QueuedLine {
+                                line: "M400".to_owned(),
+                                source: QueuedLineSource::Stop,
+                            });
+                            state.queued_lines.push_front(QueuedLine {
+                                line: "M410".to_owned(),
+                                source: QueuedLineSource::Stop,
+                            });
+                        }
+                        if state.in_flight_job_count == 0 {
+                            state.events.push(WorkerEvent::JobCancelled);
+                            state.job_active = false;
+                            state.job_cancelled = false;
+                        }
+                    }
+                    WorkerCommand::Disconnect => {
+                        state.disconnect_requested = true;
+                        break;
+                    }
+                }
+            }
+
+            if send_error.is_none() && !state.disconnect_requested && state.ready {
+                let language = state.language;
+                let WebSocketState {
+                    queued_lines,
+                    queued_job_count,
+                    in_flight_lines,
+                    in_flight_job_count,
+                    ..
+                } = &mut *state;
+                if let Err(error) = top_up_websocket_queue(
+                    &socket,
+                    queued_lines,
+                    queued_job_count,
+                    in_flight_lines,
+                    in_flight_job_count,
+                    language,
+                ) {
+                    send_error = Some(error);
+                }
+            }
+        }
+
+        if let Some(error) = send_error {
+            let mut state = shared.0.borrow_mut();
+            state.events.push(WorkerEvent::Error(error));
+            state.disconnect_requested = true;
+        }
+
+        delay_ms(10).await;
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn acknowledge_web_queued_line(
+    in_flight_lines: &mut VecDeque<QueuedLine>,
+    in_flight_job_count: &mut usize,
+    queued_job_count: usize,
+    job_active: &mut bool,
+    job_cancelled: &mut bool,
+    events: &WebEventQueue,
+) {
+    let Some(acknowledged) = in_flight_lines.pop_front() else {
+        return;
+    };
+
+    if acknowledged.source == QueuedLineSource::Job {
+        *in_flight_job_count = (*in_flight_job_count).saturating_sub(1);
+    }
+
+    if *job_active && queued_job_count == 0 && *in_flight_job_count == 0 {
+        let has_in_flight_job =
+            in_flight_lines.iter().any(|line| line.source == QueuedLineSource::Job);
+        if !has_in_flight_job {
+            events.push(if *job_cancelled {
+                WorkerEvent::JobCancelled
+            } else {
+                WorkerEvent::JobCompleted
+            });
+            *job_active = false;
+            *job_cancelled = false;
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn websocket_send_line(
+    socket: &WebSocket,
+    queued: QueuedLine,
+    in_flight_lines: &mut VecDeque<QueuedLine>,
+    language: Language,
+) -> Result<(), String> {
+    socket.send_with_str(&format!("{}\n", queued.line)).map_err(|error| {
+        format!("{}: {}", language.strings().esp3d_http_request_failed, js_error_message(error))
+    })?;
+    in_flight_lines.push_back(queued);
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn top_up_websocket_queue(
+    socket: &WebSocket,
+    queued_lines: &mut VecDeque<QueuedLine>,
+    queued_job_count: &mut usize,
+    in_flight_lines: &mut VecDeque<QueuedLine>,
+    in_flight_job_count: &mut usize,
+    language: Language,
+) -> Result<(), String> {
+    let mut sent_this_tick = 0usize;
+    while in_flight_lines.len() < ESP3D_MAX_IN_FLIGHT_LINES
+        && sent_this_tick < ESP3D_TOP_UP_LINES_PER_TICK
+    {
+        let Some(queued) = queued_lines.pop_front() else {
+            break;
+        };
+        if queued.source == QueuedLineSource::Job {
+            *queued_job_count = queued_job_count.saturating_sub(1);
+            *in_flight_job_count += 1;
+        }
+        websocket_send_line(socket, queued, in_flight_lines, language)?;
+        sent_this_tick += 1;
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn websocket_connect_error(endpoint: &str, error: JsValue, language: Language) -> String {
+    let detail = js_error_message(error);
+    if endpoint.starts_with("ws://") && web_page_uses_https() {
+        format!("{}: {detail}", language.strings().secure_websocket_required)
+    } else {
+        format!("{}: {detail}", language.strings().esp3d_http_request_failed)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 async fn web_serial_write(writer: &JsValue, bytes: &[u8]) -> Result<(), String> {
     let data = Uint8Array::new_with_length(bytes.len() as u32);
     data.copy_from(bytes);
@@ -2094,6 +2545,12 @@ fn web_serial_api() -> Option<JsValue> {
     let navigator = window.navigator();
     let serial = Reflect::get(navigator.as_ref(), &JsValue::from_str("serial")).ok()?;
     (!serial.is_undefined() && !serial.is_null()).then_some(serial)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_page_uses_https() -> bool {
+    eframe::web_sys::window().and_then(|window| window.location().protocol().ok()).as_deref()
+        == Some("https:")
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2193,7 +2650,6 @@ mod tests {
         assert_eq!(command, "G1 X12.50 Y4.00 F1800");
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn normalizes_http_esp3d_address_to_data_websocket_port() {
         assert_eq!(
@@ -2207,6 +2663,10 @@ mod tests {
         assert_eq!(
             normalize_esp3d_endpoint("ws://192.168.0.112:8282/").unwrap(),
             "ws://192.168.0.112:8282/"
+        );
+        assert_eq!(
+            normalize_esp3d_endpoint("https://esp3d.local/").unwrap(),
+            "wss://esp3d.local:8282/"
         );
     }
 

@@ -697,38 +697,32 @@ impl PenarticApp {
 
                         let mut print_start_mode_changed = false;
                         ui.add_enabled_ui(has_device_support, |ui| {
-                            #[cfg(not(target_arch = "wasm32"))]
+                            let can_change_connection_target = matches!(
+                                self.device.connection_state(),
+                                ConnectionState::Disconnected
+                            );
+                            let mut use_esp3d = self.device.use_esp3d();
+                            if ui
+                                .add_enabled(
+                                    can_change_connection_target,
+                                    egui::Checkbox::new(&mut use_esp3d, text.use_esp3d_connection),
+                                )
+                                .changed()
                             {
-                                let can_change_connection_target = matches!(
-                                    self.device.connection_state(),
-                                    ConnectionState::Disconnected
-                                );
-                                let mut use_esp3d = self.device.use_esp3d();
+                                self.device.set_use_esp3d(use_esp3d);
+                            }
+                            if self.device.use_esp3d() {
+                                ui.label(text.esp3d_address);
+                                let mut endpoint = self.device.esp3d_endpoint().to_owned();
                                 if ui
                                     .add_enabled(
                                         can_change_connection_target,
-                                        egui::Checkbox::new(
-                                            &mut use_esp3d,
-                                            text.use_esp3d_connection,
-                                        ),
+                                        egui::TextEdit::singleline(&mut endpoint)
+                                            .desired_width(ui.available_width()),
                                     )
                                     .changed()
                                 {
-                                    self.device.set_use_esp3d(use_esp3d);
-                                }
-                                if self.device.use_esp3d() {
-                                    ui.label(text.esp3d_address);
-                                    let mut endpoint = self.device.esp3d_endpoint().to_owned();
-                                    if ui
-                                        .add_enabled(
-                                            can_change_connection_target,
-                                            egui::TextEdit::singleline(&mut endpoint)
-                                                .desired_width(ui.available_width()),
-                                        )
-                                        .changed()
-                                    {
-                                        self.device.set_esp3d_endpoint(endpoint);
-                                    }
+                                    self.device.set_esp3d_endpoint(endpoint);
                                 }
                             }
 
@@ -736,10 +730,7 @@ impl PenarticApp {
                                 self.device.refresh_ports();
                             }
 
-                            #[cfg(not(target_arch = "wasm32"))]
                             let show_serial_ports = !self.device.use_esp3d();
-                            #[cfg(target_arch = "wasm32")]
-                            let show_serial_ports = true;
 
                             if show_serial_ports {
                                 let ports = self.device.ports().to_vec();

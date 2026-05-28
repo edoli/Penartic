@@ -27,6 +27,7 @@ pub(super) const STRINGS: Strings = Strings {
     esp3d_http_ready: "ESP3D WebSocket transport is available.",
     esp3d_http_connected: "Connected through ESP3D WebSocket.",
     esp3d_http_request_failed: "ESP3D WebSocket request failed",
+    secure_websocket_required: "This page is using HTTPS, so ESP3D must use wss:// or Penartic must be served from localhost/http.",
     select_port: "Select a port",
     connect: "Connect",
     disconnect: "Disconnect",

@@ -114,13 +114,19 @@ updated with the same value to avoid WGPU validation errors.
   `ws://192.168.0.112:8282/`, while explicit `ws://...` addresses are used as-is; if the Data
   WebSocket is not enabled or rejects the `arduino` subprotocol, the worker falls back to the
   HTTP `/command` endpoint so ESP3D remains usable
+- web builds can also connect through the ESP3D Data WebSocket using the same `arduino`
+  subprotocol and endpoint normalization, but browsers block mixed-content `ws://` connections from
+  an `https://` page, so hosted web builds require a `wss://` endpoint unless the app is served
+  locally over `http://`/`localhost`
 - the device controller keeps the app usable when no port is available
 - firmware/build-volume probing is intentionally best-effort because printer responses vary by firmware
 - native serial connection probing sends `M115`, `M503`, and `M211`; native ESP3D probing sends the
   same probe commands through the WebSocket queue after the socket opens;
   web connection probing starts with
   `M115` for readiness and then accepts the same firmware/build-volume response parsing while the
-  serial stream is active; Marlin `M211` `Min:`/`Max:` reports are used to detect printable width and height when `M503` does not include build volume
+  serial stream is active; web ESP3D probing sends `M115`, `M503`, and `M211` through the
+  WebSocket queue after the socket opens; Marlin `M211` `Min:`/`Max:` reports are used to detect
+  printable width and height when `M503` does not include build volume
 - if device probing fails, the manually configured printable area remains authoritative
 - detected printable area changes are applied only when the reported size actually changes, to avoid redundant rebuild churn
 - printable area changes rebuild the preview/toolpath but do not overwrite user-adjusted SVG object placement, independent X/Y scale, local size, or rotation
@@ -132,7 +138,8 @@ updated with the same value to avoid WGPU validation errors.
 - the ESP3D WebSocket worker strips comments through the shared queue, keeps a small bounded
   in-flight window so the firmware planner stays fed despite Wi-Fi/WebSocket latency, tops that
   window up in small increments instead of refilling it in one large burst, handles ESP3D binary text
-  frames, and sends `M410`/`M400` immediately when stopping a job
+  frames, tolerates compacted `ok` acknowledgement frames when deciding job completion, and sends
+  `M410`/`M400` immediately when stopping a job
 - web serial streaming follows the same comment stripping, ACK tracking, stop, jog/home, and bounded
   one-line in-flight behavior as the native worker; it requires a browser with Web Serial support, a secure
   context, and the user's explicit port selection
@@ -162,6 +169,7 @@ updated with the same value to avoid WGPU validation errors.
 14. Mark drawings that extend beyond the printable area so the UI and preview can warn/highlight them.
 15. Build preview motion segments with explicit travel lifts from the IR plus any generated fill strokes and rounded corners.
 16. Emit standard linear G-code, optional `G2`/`G3` arc commands for compatible rounded corners, and optional `G5` curve commands for preserved Bézier geometry or fallback rounded fillets from the same pipeline.
+17. Filter non-finite drawing primitives before G-code generation and fall back to an absolute travel move instead of panicking if a Z-travel helper receives mismatched XY coordinates.
 
 Current non-goals:
 
