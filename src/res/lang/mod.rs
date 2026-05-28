@@ -171,7 +171,6 @@ pub struct Strings {
     pub sent_manual_z_move: &'static str,
     pub sent_xy_home: &'static str,
     pub sent_z_home: &'static str,
-    pub no_z_lift_distance: &'static str,
     pub sent_move_to_first_start: &'static str,
     pub sent_absolute_move: &'static str,
     pub opened_serial_port_waiting_firmware: &'static str,

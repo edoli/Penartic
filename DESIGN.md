@@ -32,7 +32,7 @@ The product must remain useful even when no device is connected:
 3. Probe firmware information (`M115`) and configuration (`M503`) on a best-effort basis.
 4. If build volume information is detected, update the printable area and rebuild the toolpath without rewriting the current SVG placement or scale.
 5. Choose whether print start should home XY first or begin directly from the current position; the default is direct-start without XY homing.
-6. Use the built-in jog/home controls for XY and Z when manual positioning is needed, including helpers that raise Z by the configured lift amount, home XY, and move to either the first drawing start point or the current timeline preview position while lifted.
+6. Use the built-in jog/home controls for XY and Z when manual positioning is needed, and use the dedicated positioning helpers to move directly to either the first drawing start point or the current timeline preview position with the same absolute XY motion flow.
 7. Queue the generated G-code to the device, stop it if needed, and keep invalid actions disabled while the current state is active.
 
 ### 2.3 Motion semantics
@@ -133,7 +133,7 @@ updated with the same value to avoid WGPU validation errors.
 - printing state is tracked explicitly so start/stop/connect/disconnect controls can be enabled only when valid
 - the UI keeps polling the native serial worker while a device is connected or connecting, so asynchronous probe responses can update settings after the initial click frame
 - direct jog/home controls send synchronized metric movement commands for XY and Z when no print job is active
-- dedicated positioning commands can move to the first drawing start point, current timeline preview position, or any placed SVG bounding-box corner without starting the whole job
+- dedicated positioning commands can move to the first drawing start point, current timeline preview position, or any placed SVG bounding-box corner without starting the whole job; the first-start helper now uses the same direct absolute XY move flow as timeline positioning
 - the serial worker strips comments before transmission, sends one G-code line per firmware acknowledgement for conservative USB/firmware buffer handling, and never treats read timeouts as acknowledgements
 - the ESP3D WebSocket worker strips comments through the shared queue, keeps a small bounded
   in-flight window so the firmware planner stays fed despite Wi-Fi/WebSocket latency, tops that

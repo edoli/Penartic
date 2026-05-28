@@ -128,7 +128,6 @@ pub(super) const STRINGS: Strings = Strings {
     sent_manual_z_move: "Sent a manual Z move command.",
     sent_xy_home: "Sent an XY home command.",
     sent_z_home: "Sent a Z home command.",
-    no_z_lift_distance: "There is no Z lift distance to move.",
     sent_move_to_first_start: "Sent a move command to the first drawing start position.",
     sent_absolute_move: "Sent an absolute-position move command.",
     opened_serial_port_waiting_firmware: "Opened the serial port. Waiting for firmware responses.",

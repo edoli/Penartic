@@ -846,10 +846,9 @@ impl PenarticApp {
                                 .clicked()
                             {
                                 if let Some(first_draw_point) = first_draw_point {
-                                    let result = self.device.home_xy_and_move_to(
+                                    let result = self.device.move_to_first_start(
                                         first_draw_point.x,
                                         first_draw_point.y,
-                                        self.settings.lift_height_mm,
                                         self.settings.travel_feed_rate(),
                                     );
                                     self.apply_device_action(result);

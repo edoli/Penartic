@@ -521,36 +521,22 @@ impl DeviceController {
         )
     }
 
-    pub fn home_xy_and_move_to(
+    pub fn move_to_first_start(
         &mut self,
         x_mm: f32,
         y_mm: f32,
-        lift_height_mm: f32,
         feed_rate_mm_min: f32,
     ) -> Result<(), String> {
-        let lift_command = build_relative_move_command(0.0, 0.0, lift_height_mm, feed_rate_mm_min)
-            .ok_or_else(|| self.text().no_z_lift_distance.to_owned())?;
         self.queue_manual_commands(
             self.text().sent_move_to_first_start,
-            vec![
-                "G21".to_owned(),
-                "M400".to_owned(),
-                "G91".to_owned(),
-                lift_command,
-                "M400".to_owned(),
-                "G90".to_owned(),
-                "G28 X Y".to_owned(),
-                build_absolute_xy_move_command(x_mm, y_mm, feed_rate_mm_min),
-                "M400".to_owned(),
-            ],
+            build_absolute_xy_move_commands(x_mm, y_mm, feed_rate_mm_min),
         )
     }
 
     pub fn move_to(&mut self, x_mm: f32, y_mm: f32, feed_rate_mm_min: f32) -> Result<(), String> {
-        let command = build_absolute_xy_move_command(x_mm, y_mm, feed_rate_mm_min);
         self.queue_manual_commands(
             self.text().sent_absolute_move,
-            vec!["G21".to_owned(), "M400".to_owned(), "G90".to_owned(), command, "M400".to_owned()],
+            build_absolute_xy_move_commands(x_mm, y_mm, feed_rate_mm_min),
         )
     }
 
@@ -1747,6 +1733,16 @@ fn build_absolute_xy_move_command(x_mm: f32, y_mm: f32, feed_rate_mm_min: f32) -
     format!("G1 X{x_mm:.2} Y{y_mm:.2} F{:.0}", feed_rate_mm_min.max(60.0))
 }
 
+fn build_absolute_xy_move_commands(x_mm: f32, y_mm: f32, feed_rate_mm_min: f32) -> Vec<String> {
+    vec![
+        "G21".to_owned(),
+        "M400".to_owned(),
+        "G90".to_owned(),
+        build_absolute_xy_move_command(x_mm, y_mm, feed_rate_mm_min),
+        "M400".to_owned(),
+    ]
+}
+
 fn extract_axis_value(line: &str, axis: char) -> Option<f32> {
     let bytes = line.as_bytes();
     let axis = axis as u8;
@@ -2648,6 +2644,21 @@ mod tests {
     fn builds_absolute_xy_move_command_for_first_point() {
         let command = build_absolute_xy_move_command(12.5, 4.0, 1800.0);
         assert_eq!(command, "G1 X12.50 Y4.00 F1800");
+    }
+
+    #[test]
+    fn builds_absolute_xy_move_sequence_for_manual_positioning() {
+        let commands = build_absolute_xy_move_commands(12.5, 4.0, 1800.0);
+        assert_eq!(
+            commands,
+            vec![
+                "G21".to_owned(),
+                "M400".to_owned(),
+                "G90".to_owned(),
+                "G1 X12.50 Y4.00 F1800".to_owned(),
+                "M400".to_owned(),
+            ]
+        );
     }
 
     #[test]

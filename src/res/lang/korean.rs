@@ -128,7 +128,6 @@ pub(super) const STRINGS: Strings = Strings {
     sent_manual_z_move: "수동 Z 이동 명령을 전송했습니다.",
     sent_xy_home: "XY 홈 이동 명령을 전송했습니다.",
     sent_z_home: "Z 홈 이동 명령을 전송했습니다.",
-    no_z_lift_distance: "Z 리프트 이동 거리가 없습니다.",
     sent_move_to_first_start: "첫 그리기 시작 위치 이동 명령을 전송했습니다.",
     sent_absolute_move: "절대 좌표로 이동 명령을 전송했습니다.",
     opened_serial_port_waiting_firmware: "시리얼 포트를 열었습니다. 펌웨어 응답을 기다립니다.",
