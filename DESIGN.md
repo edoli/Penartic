@@ -4,7 +4,7 @@
 
 Penartic is a Rust-based pen plotting and repurposed-3D-printer drawing application.
 The app converts SVG input into an intermediate representation (IR) and then into motion/G-code,
-previews the motion in a 3D viewport,
+previews the motion in a switchable 2D/3D viewport,
 and can optionally send the job to a connected device over serial, ESP3D, or OctoPrint.
 
 The product must remain useful even when no device is connected:
@@ -22,7 +22,7 @@ The product must remain useful even when no device is connected:
 3. Load one or more SVG files through the file picker, drag-and-drop, or a native startup path used for validation.
 4. Start each SVG from its raw coordinate size interpreted as millimeters, centered once on load, then select individual SVG objects and adjust position, independent X/Y scale, local width/height in millimeters, and rotation from the object toolbar or preview gizmo controls when needed.
 5. Convert each SVG into reusable IR, combine the placed objects into one preview motion/G-code job, and avoid automatically rescaling existing SVG placements when printable area settings later change.
-6. Show the completed result immediately in the 3D preview, then scrub backward or replay it with the timeline slider using real motion time.
+6. Show the completed result immediately in the preview, switch between 2D top-down and 3D perspective views as needed, then scrub backward or replay it with the timeline slider using real motion time.
 7. Copy the generated G-code if needed.
 
 ### 2.2 Connected workflow
@@ -71,11 +71,11 @@ The product must remain useful even when no device is connected:
 ### 4.1 UI layout
 
 - left sidebar: fixed-width, vertically scrollable language selector, device controls, connection-method selector, method-specific connection settings, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
-- sidebar action buttons use a slightly taller shared height, paired device/job actions are laid out in evenly sized columns with explicit spacing, the print-start homing toggle sits directly under the print action row, long firmware text stays on one line with hover access to the full value, the upper sidebar controls scroll independently from a left-aligned device log section that fills the remaining sidebar height, advanced G2/G3, G5, corner-smoothing, and SVG fill controls can be toggled from settings, and sidebar content growth must not resize the 3D preview when the window size stays fixed
-- central panel: a full-size 3D preview canvas with a translucent top object toolbar for move/scale/rotate selection, numeric X/Y position, independent X/Y scale percentages, local width/height millimeter edits, a default-on aspect-ratio lock for scale edits, rotation edits, and selected-object deletion; mode-specific gizmos provide move arrows, scale handles, or a rotation ring, and a translucent bottom overlay keeps playback buttons and the full-width timeline slider visible in smaller windows
-- the preview overlay can command a connected idle device to move to the current timeline pen position and can toggle lifted travel paths or the placed SVG bounding box
+- sidebar action buttons use a slightly taller shared height, paired device/job actions are laid out in evenly sized columns with explicit spacing, the print-start homing toggle sits directly under the print action row, long firmware text stays on one line with hover access to the full value, the upper sidebar controls scroll independently from a left-aligned device log section that fills the remaining sidebar height, advanced G2/G3, G5, corner-smoothing, and SVG fill controls can be toggled from settings, and sidebar content growth must not resize the preview canvas when the window size stays fixed
+- central panel: a full-size preview canvas with a translucent top object toolbar for move/scale/rotate selection, numeric X/Y position, independent X/Y scale percentages, local width/height millimeter edits, a default-on aspect-ratio lock for scale edits, rotation edits, and selected-object deletion; mode-specific gizmos provide move arrows, scale handles, or a rotation ring, and a translucent bottom overlay keeps playback buttons, the 2D/3D view selector, and the full-width timeline slider visible in smaller windows
+- the preview overlay can command a connected idle device to move to the current timeline pen position, switch between 2D and 3D view modes, and toggle lifted travel paths or the placed SVG bounding box
 
-### 4.2 3D preview
+### 4.2 Preview modes
 
 The preview uses an `egui_wgpu::CallbackTrait` paint callback instead of a separate rendering
 window. The callback draws:
@@ -85,11 +85,11 @@ window. The callback draws:
 - the current pen mesh at the playback position
 - motion progress using elapsed toolpath time rather than raw segment count
 - out-of-bounds SVG segments, plus the combined placed SVG bounding box when the matching preview option is enabled
-- the default camera starts from a front-aligned orientation instead of a rotated diagonal view
-- left drag rotates the camera unless it starts on a selectable SVG object; object drags manipulate the selected object according to the top toolbar mode, and right drag pans the view across the bed plane
+- the default 3D camera starts from a front-aligned orientation instead of a rotated diagonal view, while 2D mode uses a top-down orthographic bed view
+- left drag rotates the camera in 3D unless it starts on a selectable SVG object; in 2D, background left drag pans instead; object drags manipulate the selected object according to the top toolbar mode, and right drag continues to pan
 - preview vertex buffers may grow when printable area or toolpath density changes and therefore must be resized safely before queue writes
 - preview geometry is cached in world coordinates and transformed in the preview shader with a
-  per-frame camera uniform, so panning/rotating/zooming complex SVGs does not rebuild or re-upload
+  per-frame camera uniform, so switching between 2D/3D, panning, rotating, or zooming complex SVGs does not rebuild or re-upload
   the full toolpath vertex buffer
 
 ### 4.3 WGPU/MSAA rule
@@ -100,9 +100,9 @@ updated with the same value to avoid WGPU validation errors.
 
 ## 5. Fonts and localization
 
-- the UI supports English and Korean, defaults to English, persists the selected language, the last-used device connection preferences, and the current G2/G3 or G5 curve-output selection through eframe storage on native and web builds, and sources localized strings from `src/res/lang/english.rs` and `src/res/lang/korean.rs`
+- the UI supports English and Korean, defaults to English, persists the selected language, the last-used device connection preferences, the current G2/G3 or G5 curve-output selection, and the selected 2D/3D preview mode through eframe storage on native and web builds, and sources localized strings from `src/res/lang/english.rs` and `src/res/lang/korean.rs`
 - language persistence relies on `eframe`'s `persistence` feature, which maps to native app storage on desktop builds and browser local storage on web builds
-- persisted device preferences include the selected connection method, serial port, ESP3D endpoint, and OctoPrint base URL/API key so the last-used device configuration is restored on restart, and the persisted tool settings currently keep the selected curve-output mode so G2/G3 and G5 toggles survive restart as well
+- persisted device preferences include the selected connection method, serial port, ESP3D endpoint, and OctoPrint base URL/API key so the last-used device configuration is restored on restart, and the persisted app state also keeps the selected curve-output mode and 2D/3D preview mode so those toggles survive restart as well
 - Korean mode still needs CJK-capable fallback fonts for the UI and warning text
 - native builds asynchronously scan platform font locations and an optional `fallback_font.ttf`
   next to the executable
@@ -193,7 +193,7 @@ Current non-goals:
 | Capability | Windows / macOS / Linux | Web |
 | --- | --- | --- |
 | SVG import and conversion | Yes | Yes |
-| 3D preview | Yes | Yes |
+| 2D/3D preview | Yes | Yes |
 | G-code copy/export flow | Yes | Yes |
 | Serial device connection | Yes | Yes, through Web Serial |
 | ESP3D device connection | Yes | Yes |
@@ -206,10 +206,10 @@ Current non-goals:
 
 - formatting: `cargo fmt`
 - native validation: `cargo build`, `cargo test`
-- web validation: `cargo build --target wasm32-unknown-unknown`
+- web validation: `cargo build --target wasm32-unknown-unknown`, plus `trunk build --release` when changing browser-only integration such as Web Serial or ESP3D workers
 - SVG regression validation: load every file under `sample\*.svg` through the test suite
 - native visual validation: run `cargo run --bin ui_screenshot_validation -- --svg sample\sample_curve.svg --out target\validation\ui-validation.png --delay-seconds 2`, then inspect the generated screenshot for obvious layout or rendering anomalies
-- GitHub Pages deployment: pushes to `main` run `.github/workflows/deploy-pages.yml`, validate sample SVG loading, build the Trunk web bundle with a repository-relative public URL, and deploy the `dist` artifact through GitHub Pages Actions
+- GitHub Pages deployment: pushes to `main` run `.github/workflows/deploy-pages.yml`, validate sample SVG loading, build the Trunk web bundle with a repository-relative public URL, and deploy the `dist` artifact through GitHub Pages Actions; browser-only device code must therefore stay compiling on the `wasm32-unknown-unknown` target even when the native device transports are refactored
 - VS Code launch strategy:
   - Windows native debugging uses `cppvsdbg`
   - macOS/Linux native debugging uses `lldb`

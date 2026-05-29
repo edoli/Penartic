@@ -1,5 +1,20 @@
 use super::*;
 
+#[cfg(target_arch = "wasm32")]
+use std::{cell::RefCell, rc::Rc};
+
+#[cfg(target_arch = "wasm32")]
+use js_sys::{Object, Reflect, Uint8Array};
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsValue;
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::spawn_local;
+
+#[cfg(target_arch = "wasm32")]
+use super::esp3d::acknowledge_web_queued_line;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) fn run_serial_worker(
     port_name: String,

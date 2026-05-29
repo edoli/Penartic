@@ -9,6 +9,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::{plot::model::PrintableArea, res::lang::Language};
 
+#[cfg(target_arch = "wasm32")]
+use std::{cell::RefCell, rc::Rc};
+
+#[cfg(target_arch = "wasm32")]
+use js_sys::{Function, Reflect, Uint8Array};
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, JsValue};
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::{JsFuture, spawn_local};
+
 const DEVICE_LOG_LIMIT: usize = 200;
 const DEFAULT_ESP3D_ENDPOINT: &str = "http://192.168.0.112/";
 const DEFAULT_OCTOPRINT_BASE_URL: &str = "http://127.0.0.1:5000/";
@@ -378,7 +390,7 @@ impl DeviceController {
                     return Err(self.text().octoprint_unavailable_in_web.to_owned());
                 }
             };
-            let target_label = target.target_label();
+            let target_label = target.target_label(self.language);
 
             self.disconnect();
             let worker = WebWorker::spawn(target, self.language);

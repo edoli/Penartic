@@ -1,5 +1,20 @@
 use super::*;
 
+#[cfg(target_arch = "wasm32")]
+use std::{cell::RefCell, rc::Rc};
+
+#[cfg(target_arch = "wasm32")]
+use js_sys::{ArrayBuffer, Uint8Array};
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, JsValue, closure::Closure};
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::spawn_local;
+
+#[cfg(target_arch = "wasm32")]
+use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket};
+
 const ESP3D_DEFAULT_DATA_WEBSOCKET_PORT: u16 = 8282;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -808,7 +823,7 @@ async fn websocket_writer_loop(shared: WebSocketShared, socket: WebSocket) {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn acknowledge_web_queued_line(
+pub(super) fn acknowledge_web_queued_line(
     in_flight_lines: &mut VecDeque<QueuedLine>,
     in_flight_job_count: &mut usize,
     queued_job_count: usize,
