@@ -19,8 +19,8 @@ use crate::{
     plot::{
         gcode,
         model::{
-            CurveOutputMode, FillPattern, PrintStartMode, PrintableArea, SvgPlacement,
-            ToolSettings, ToolpathPlan,
+            CurveOutputMode, FillPattern, MAX_FILL_SPACING_MM, MIN_FILL_SPACING_MM, PrintStartMode,
+            PrintableArea, SvgPlacement, ToolSettings, ToolpathPlan,
         },
     },
     res::{
@@ -1145,10 +1145,10 @@ impl PenarticApp {
                             settings_changed |= previous_pattern != self.settings.fill_pattern;
                             settings_changed |= drag_value_row(
                                 ui,
-                                text.fill_density,
-                                &mut self.settings.fill_density_percent,
-                                1.0,
-                                1.0..=100.0,
+                                text.fill_spacing,
+                                &mut self.settings.fill_spacing_mm,
+                                0.1,
+                                MIN_FILL_SPACING_MM..=MAX_FILL_SPACING_MM,
                             );
                             settings_changed |= drag_value_row(
                                 ui,
@@ -1157,7 +1157,7 @@ impl PenarticApp {
                                 1.0,
                                 0.0..=179.0,
                             );
-                            ui.small(text.fill_density_hint);
+                            ui.small(text.fill_spacing_hint);
                         }
 
                         if settings_changed || print_start_mode_changed {

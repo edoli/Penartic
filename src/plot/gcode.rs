@@ -5,8 +5,8 @@ use glam::{Vec2, vec2, vec3};
 use crate::{
     paths::{CubicBezierSegment, FillRegion, FillRule, PreparedSvg, Segment, Stroke},
     plot::model::{
-        CurveOutputMode, FillPattern, MotionKind, MotionSegment, PrintStartMode, ToolSettings,
-        ToolpathPlan, ToolpathStats,
+        CurveOutputMode, FillPattern, MAX_FILL_SPACING_MM, MIN_FILL_SPACING_MM, MotionKind,
+        MotionSegment, PrintStartMode, ToolSettings, ToolpathPlan, ToolpathStats,
     },
     res::lang::Language,
 };
@@ -20,8 +20,6 @@ const ARC_RADIUS_TOLERANCE_MM: f32 = 0.05;
 const ARC_RADIUS_TOLERANCE_RATIO: f32 = 0.005;
 const ARC_DETECTION_TANGENT_MIN_DOT: f32 = 0.98;
 const MIN_DETECTABLE_ARC_SWEEP_RAD: f32 = 0.05;
-const MIN_FILL_SPACING_MM: f32 = 0.6;
-const MAX_FILL_SPACING_MM: f32 = 8.0;
 const FILL_CONNECTOR_TOLERANCE_MM: f32 = 0.05;
 const FILL_CONNECTOR_SAMPLE_STEP_MM: f32 = 0.5;
 const CONTINUOUS_ZIGZAG_CONNECTOR_FACTOR: f32 = 2.5;
@@ -386,7 +384,7 @@ struct DirectedFillSegment {
 }
 
 fn generate_fill_strokes(region: &FillRegion, settings: &ToolSettings) -> Vec<Stroke> {
-    if region.is_empty() || settings.fill_density_percent <= 0.0 {
+    if region.is_empty() || settings.fill_spacing_mm <= 0.0 {
         return Vec::new();
     }
 
@@ -447,7 +445,7 @@ fn fill_hatch_strokes(
     let angle = angle_degrees.to_radians();
     let direction = vec2(angle.cos(), angle.sin()).normalize_or_zero();
     let normal = vec2(-direction.y, direction.x);
-    let spacing = fill_spacing_mm(settings.fill_density_percent);
+    let spacing = settings.fill_spacing_mm.clamp(MIN_FILL_SPACING_MM, MAX_FILL_SPACING_MM);
     let Some((min_offset, max_offset)) = fill_offset_bounds(contours, normal) else {
         return Vec::new();
     };
@@ -480,7 +478,7 @@ fn fill_continuous_zigzag_strokes(
     let angle = angle_degrees.to_radians();
     let direction = vec2(angle.cos(), angle.sin()).normalize_or_zero();
     let normal = vec2(-direction.y, direction.x);
-    let spacing = fill_spacing_mm(settings.fill_density_percent);
+    let spacing = settings.fill_spacing_mm.clamp(MIN_FILL_SPACING_MM, MAX_FILL_SPACING_MM);
     let Some((min_offset, max_offset)) = fill_offset_bounds(contours, normal) else {
         return Vec::new();
     };
@@ -551,11 +549,6 @@ fn fill_continuous_zigzag_strokes(
 
     finished.extend(active_polylines.into_iter().filter_map(stroke_from_polyline));
     finished
-}
-
-fn fill_spacing_mm(density_percent: f32) -> f32 {
-    let density = (density_percent.clamp(1.0, 100.0) - 1.0) / 99.0;
-    MAX_FILL_SPACING_MM + (MIN_FILL_SPACING_MM - MAX_FILL_SPACING_MM) * density
 }
 
 fn closed_polyline(mut points: Vec<Vec2>) -> Vec<Vec2> {
@@ -1694,7 +1687,7 @@ mod tests {
             printable_area: PrintableArea::new(100.0, 100.0),
             print_start_mode: PrintStartMode::DirectFromCurrentPosition,
             fill_pattern,
-            fill_density_percent: 100.0,
+            fill_spacing_mm: 0.6,
             fill_angle_degrees: 0.0,
             ..ToolSettings::default()
         }
@@ -2225,7 +2218,7 @@ mod tests {
             &ToolSettings {
                 printable_area: PrintableArea::new(100.0, 100.0),
                 print_start_mode: PrintStartMode::DirectFromCurrentPosition,
-                fill_density_percent: 100.0,
+                fill_spacing_mm: 0.6,
                 fill_angle_degrees: 0.0,
                 ..ToolSettings::default()
             },

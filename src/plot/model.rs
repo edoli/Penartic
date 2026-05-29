@@ -1,6 +1,9 @@
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
+pub const MIN_FILL_SPACING_MM: f32 = 0.1;
+pub const MAX_FILL_SPACING_MM: f32 = 20.0;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PrintableArea {
     pub width_mm: f32,
@@ -67,8 +70,8 @@ fn default_fill_enabled() -> bool {
     true
 }
 
-fn default_fill_density_percent() -> f32 {
-    35.0
+fn default_fill_spacing_mm() -> f32 {
+    5.5
 }
 
 fn default_fill_angle_degrees() -> f32 {
@@ -94,8 +97,8 @@ pub struct ToolSettings {
     pub fill_enabled: bool,
     #[serde(default)]
     pub fill_pattern: FillPattern,
-    #[serde(default = "default_fill_density_percent")]
-    pub fill_density_percent: f32,
+    #[serde(default = "default_fill_spacing_mm")]
+    pub fill_spacing_mm: f32,
     #[serde(default = "default_fill_angle_degrees")]
     pub fill_angle_degrees: f32,
 }
@@ -108,7 +111,7 @@ impl ToolSettings {
         self.lift_height_mm = self.lift_height_mm.clamp(0.1, 25.0);
         self.corner_smoothing_radius_mm = self.corner_smoothing_radius_mm.clamp(0.1, 10.0);
         self.corner_smoothing_angle_deg = self.corner_smoothing_angle_deg.clamp(5.0, 170.0);
-        self.fill_density_percent = self.fill_density_percent.clamp(1.0, 100.0);
+        self.fill_spacing_mm = self.fill_spacing_mm.clamp(MIN_FILL_SPACING_MM, MAX_FILL_SPACING_MM);
         self.fill_angle_degrees = self.fill_angle_degrees.rem_euclid(180.0);
     }
 
@@ -134,7 +137,7 @@ impl Default for ToolSettings {
             corner_smoothing_angle_deg: default_corner_smoothing_angle_deg(),
             fill_enabled: default_fill_enabled(),
             fill_pattern: FillPattern::default(),
-            fill_density_percent: default_fill_density_percent(),
+            fill_spacing_mm: default_fill_spacing_mm(),
             fill_angle_degrees: default_fill_angle_degrees(),
         }
     }
@@ -350,5 +353,6 @@ mod tests {
         assert_eq!(settings.lift_height_mm, 1.0);
         assert_eq!(settings.print_start_mode, PrintStartMode::DirectFromCurrentPosition);
         assert!(!settings.corner_smoothing_enabled);
+        assert_eq!(settings.fill_spacing_mm, 5.5);
     }
 }
