@@ -2184,7 +2184,13 @@ mod tests {
             is_out_of_bounds: false,
         };
 
-        let plan = build_plan(prepared, &ToolSettings::default());
+        let plan = build_plan(
+            prepared,
+            &ToolSettings {
+                curve_output_mode: CurveOutputMode::LinearSegments,
+                ..ToolSettings::default()
+            },
+        );
         let draw_lines = plan
             .gcode_lines
             .iter()

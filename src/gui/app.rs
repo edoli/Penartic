@@ -2065,6 +2065,6 @@ mod tests {
             load_persisted_app_state(&storage).expect("legacy language storage should load");
 
         assert_eq!(loaded.language, Language::Korean);
-        assert_eq!(loaded.curve_output_mode, CurveOutputMode::LinearSegments);
+        assert_eq!(loaded.curve_output_mode, CurveOutputMode::default());
     }
 }
