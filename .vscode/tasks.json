@@ -71,7 +71,7 @@
         "ui_screenshot_validation",
         "--",
         "--svg",
-        "${workspaceFolder}/sample/sample1.svg",
+        "${workspaceFolder}/sample/sample_curve.svg",
         "--out",
         "${workspaceFolder}/target/validation/ui-validation.png",
         "--delay-seconds",

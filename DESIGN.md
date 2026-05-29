@@ -208,7 +208,7 @@ Current non-goals:
 - native validation: `cargo build`, `cargo test`
 - web validation: `cargo build --target wasm32-unknown-unknown`
 - SVG regression validation: load every file under `sample\*.svg` through the test suite
-- native visual validation: run `cargo run --bin ui_screenshot_validation -- --svg sample\sample1.svg --out target\validation\ui-validation.png --delay-seconds 2`, then inspect the generated screenshot for obvious layout or rendering anomalies
+- native visual validation: run `cargo run --bin ui_screenshot_validation -- --svg sample\sample_curve.svg --out target\validation\ui-validation.png --delay-seconds 2`, then inspect the generated screenshot for obvious layout or rendering anomalies
 - GitHub Pages deployment: pushes to `main` run `.github/workflows/deploy-pages.yml`, validate sample SVG loading, build the Trunk web bundle with a repository-relative public URL, and deploy the `dist` artifact through GitHub Pages Actions
 - VS Code launch strategy:
   - Windows native debugging uses `cppvsdbg`

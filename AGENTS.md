@@ -19,5 +19,5 @@
 - After making code changes, run `cargo fmt`.
 - After Rust code changes, run `cargo build`.
 - After SVG-related Rust code changes, run `cargo test loads_all_sample_svg_assets_from_repository`.
-- After UI layout, preview rendering/timeline behavior, SVG loading UX, or drag-and-drop changes, run the screenshot validation workflow: launch the app with `sample\sample1.svg`, wait briefly, capture a screenshot, and inspect it for obvious layout/rendering issues. On Windows, use the VS Code task `ui screenshot validation`.
+- After UI layout, preview rendering/timeline behavior, SVG loading UX, or drag-and-drop changes, run the screenshot validation workflow: launch the app with `sample\sample_curve.svg`, wait briefly, capture a screenshot, and inspect it for obvious layout/rendering issues. On Windows, use the VS Code task `ui screenshot validation`.
 - If `cargo build` is blocked because a running `penartic` process is holding the executable open (for example from a VS Code debug session), terminate the `penartic` process and retry the build.

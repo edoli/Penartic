@@ -76,6 +76,6 @@ fn next_f32(
 #[cfg(not(target_arch = "wasm32"))]
 fn print_help() {
     println!(
-        "Usage: cargo run --bin ui_screenshot_validation -- [--svg sample/sample1.svg] [--out target/validation/ui-validation.png] [--delay-seconds 2] [--timeout-seconds 20]"
+        "Usage: cargo run --bin ui_screenshot_validation -- [--svg sample/sample_curve.svg] [--out target/validation/ui-validation.png] [--delay-seconds 2] [--timeout-seconds 20]"
     );
 }

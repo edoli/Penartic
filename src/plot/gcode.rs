@@ -1726,20 +1726,20 @@ mod tests {
 
     fn sample_svg_bytes(source_name: &str) -> &'static [u8] {
         match source_name {
-            "sample1.svg" => {
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/sample/sample1.svg"))
+            "sample_curve.svg" => {
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/sample/sample_curve.svg"))
                     as &[u8]
             }
-            "sample2.svg" => {
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/sample/sample2.svg"))
+            "sample_letters.svg" => {
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/sample/sample_letters.svg"))
                     as &[u8]
             }
-            "sample3.svg" => {
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/sample/sample3.svg"))
+            "sample_cafe.svg" => {
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/sample/sample_cafe.svg"))
                     as &[u8]
             }
-            "sample5.svg" => {
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/sample/sample5.svg"))
+            "sample_cat.svg" => {
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/sample/sample_cat.svg"))
                     as &[u8]
             }
             _ => panic!("unsupported repository sample: {source_name}"),
@@ -1773,8 +1773,8 @@ mod tests {
         build_plan(sample_prepared_svg(source_name), &sample_tool_settings(curve_output_mode))
     }
 
-    fn sample1_plan(curve_output_mode: CurveOutputMode) -> ToolpathPlan {
-        sample_plan("sample1.svg", curve_output_mode)
+    fn sample_curve_plan(curve_output_mode: CurveOutputMode) -> ToolpathPlan {
+        sample_plan("sample_curve.svg", curve_output_mode)
     }
 
     fn sample_arc_optimization_metrics(source_name: &str) -> SampleArcOptimizationMetrics {
@@ -2073,9 +2073,9 @@ mod tests {
     }
 
     #[test]
-    fn sample1_reports_arc_command_counts_in_g2g3_mode() {
-        let linear = sample1_plan(CurveOutputMode::LinearSegments);
-        let arc = sample1_plan(CurveOutputMode::PreferG2G3);
+    fn sample_curve_reports_arc_command_counts_in_g2g3_mode() {
+        let linear = sample_curve_plan(CurveOutputMode::LinearSegments);
+        let arc = sample_curve_plan(CurveOutputMode::PreferG2G3);
         let (linear_g1, linear_g2, linear_g3) = count_motion_commands(&linear);
         let (arc_g1, arc_g2, arc_g3) = count_motion_commands(&arc);
 
@@ -2086,7 +2086,9 @@ mod tests {
 
     #[test]
     fn sample_svg_arc_optimization_reports_geometric_error() {
-        for sample in ["sample1.svg", "sample2.svg", "sample3.svg", "sample5.svg"] {
+        for sample in
+            ["sample_curve.svg", "sample_letters.svg", "sample_cafe.svg", "sample_cat.svg"]
+        {
             let metrics = sample_arc_optimization_metrics(sample);
             let optimized_total =
                 metrics.optimized_g1 + metrics.optimized_g2 + metrics.optimized_g3;

@@ -24,7 +24,7 @@ pub struct NativeScreenshotValidationConfig {
 impl Default for NativeScreenshotValidationConfig {
     fn default() -> Self {
         Self {
-            startup_svg_path: PathBuf::from("sample/sample1.svg"),
+            startup_svg_path: PathBuf::from("sample/sample_curve.svg"),
             output_path: PathBuf::from("target/validation/ui-validation.png"),
             delay: Duration::from_secs(2),
             timeout: Duration::from_secs(20),
