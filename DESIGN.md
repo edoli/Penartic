@@ -42,7 +42,7 @@ The product must remain useful even when no device is connected:
 - jobs in home-start mode lift Z with a relative move, home XY, move to the first drawing point while lifted, lower Z with a relative move, and then draw
 - jobs in direct-start mode skip XY homing but still lift Z by the configured amount, move to the first drawing point while lifted, lower Z with a relative move, and then draw
 - drawing moves within a stroke are emitted as continuous `G1` XY moves by default; optional sharp-corner rounding is disabled by default, can emit generated rounded-corner arcs as `G2`/`G3` when enabled, and when G2/G3 output is enabled without G5 the app deduplicates the prepared stroke polyline and greedily compresses it into circular arcs and straight runs, but only accepts candidate arcs that satisfy seed/sagitta gates and stay close to the original polyline vertices plus segment midpoints before falling back to segmented `G1` output
-- filled SVG paths are converted into internal hatch strokes before G-code generation when fill support is enabled
+- filled SVG paths are converted into internal fill strokes before G-code generation when fill support is enabled, including segmented hatch rows and continuous zigzag passes that keep the pen down across adjacent rows when possible
 
 ## 3. Runtime architecture
 
@@ -176,7 +176,7 @@ updated with the same value to avoid WGPU validation errors.
 10. Apply the current placement to the already ordered stroke and fill IR when SVG position, scale, or rotation changes, so
    placement rebuilds do not repeat dash splitting or stroke-order optimization.
 11. Combine all placed objects into a single prepared drawing job while preserving per-object placement state for selection, warnings, and manipulation.
-12. When fill support is enabled, generate pen hatch strokes for filled regions before outline strokes. Fill patterns currently include single-direction lines, crosshatch, and alternating zigzag rows. Fill density is exposed as a percentage and converted internally to hatch spacing, with higher density producing tighter spacing.
+12. When fill support is enabled, generate pen fill strokes for filled regions before outline strokes. Fill patterns currently include single-direction lines, crosshatch, segmented zigzag rows, and continuous zigzag rows that greedily stitch adjacent scanlines when the connector stays inside the filled region. Fill density is exposed as a percentage and converted internally to spacing between successive fill passes, with higher density producing tighter spacing.
 13. Optionally replace sharp joins between adjacent primitives by comparing their end/start tangents and inserting a tiny rounded transition using a configurable radius and turn-angle threshold.
 14. Mark drawings that extend beyond the printable area so the UI and preview can warn/highlight them.
 15. Build preview motion segments with explicit travel lifts from the IR plus any generated fill strokes and rounded corners.

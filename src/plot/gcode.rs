@@ -22,6 +22,9 @@ const ARC_DETECTION_TANGENT_MIN_DOT: f32 = 0.98;
 const MIN_DETECTABLE_ARC_SWEEP_RAD: f32 = 0.05;
 const MIN_FILL_SPACING_MM: f32 = 0.6;
 const MAX_FILL_SPACING_MM: f32 = 8.0;
+const FILL_CONNECTOR_TOLERANCE_MM: f32 = 0.05;
+const FILL_CONNECTOR_SAMPLE_STEP_MM: f32 = 0.5;
+const CONTINUOUS_ZIGZAG_CONNECTOR_FACTOR: f32 = 2.5;
 const POLYLINE_FIT_TOLERANCE_MM: f32 = 0.1;
 const MIN_POLYLINE_ARC_SEED_DISTANCE_MM: f32 = 0.2;
 const MIN_POLYLINE_ARC_SAGITTA_MM: f32 = 0.2;
@@ -376,20 +379,37 @@ pub fn build_plan_with_language(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DirectedFillSegment {
+    start: Vec2,
+    end: Vec2,
+}
+
 fn generate_fill_strokes(region: &FillRegion, settings: &ToolSettings) -> Vec<Stroke> {
     if region.is_empty() || settings.fill_density_percent <= 0.0 {
         return Vec::new();
     }
 
+    let contours = flattened_fill_contours(region);
+    if contours.is_empty() {
+        return Vec::new();
+    }
+
     match settings.fill_pattern {
         FillPattern::Lines => {
-            fill_hatch_strokes(region, settings.fill_angle_degrees, settings, false)
+            fill_hatch_strokes(&contours, region.rule, settings.fill_angle_degrees, settings, false)
         }
         FillPattern::Crosshatch => {
-            let mut strokes =
-                fill_hatch_strokes(region, settings.fill_angle_degrees, settings, false);
+            let mut strokes = fill_hatch_strokes(
+                &contours,
+                region.rule,
+                settings.fill_angle_degrees,
+                settings,
+                false,
+            );
             strokes.extend(fill_hatch_strokes(
-                region,
+                &contours,
+                region.rule,
                 settings.fill_angle_degrees + 90.0,
                 settings,
                 false,
@@ -397,64 +417,51 @@ fn generate_fill_strokes(region: &FillRegion, settings: &ToolSettings) -> Vec<St
             strokes
         }
         FillPattern::Zigzag => {
-            fill_hatch_strokes(region, settings.fill_angle_degrees, settings, true)
+            fill_hatch_strokes(&contours, region.rule, settings.fill_angle_degrees, settings, true)
         }
+        FillPattern::ContinuousZigzag => fill_continuous_zigzag_strokes(
+            &contours,
+            region.rule,
+            settings.fill_angle_degrees,
+            settings,
+        ),
     }
 }
 
-fn fill_hatch_strokes(
-    region: &FillRegion,
-    angle_degrees: f32,
-    settings: &ToolSettings,
-    alternate_direction: bool,
-) -> Vec<Stroke> {
-    let contours = region
+fn flattened_fill_contours(region: &FillRegion) -> Vec<Vec<Vec2>> {
+    region
         .contours
         .iter()
         .map(|stroke| closed_polyline(stroke.flatten_points()))
         .filter(|points| points.len() >= 4)
-        .collect::<Vec<_>>();
-    if contours.is_empty() {
-        return Vec::new();
-    }
+        .collect()
+}
 
+fn fill_hatch_strokes(
+    contours: &[Vec<Vec2>],
+    rule: FillRule,
+    angle_degrees: f32,
+    settings: &ToolSettings,
+    alternate_direction: bool,
+) -> Vec<Stroke> {
     let angle = angle_degrees.to_radians();
     let direction = vec2(angle.cos(), angle.sin()).normalize_or_zero();
     let normal = vec2(-direction.y, direction.x);
     let spacing = fill_spacing_mm(settings.fill_density_percent);
-    let mut min_offset = f32::INFINITY;
-    let mut max_offset = f32::NEG_INFINITY;
-
-    for point in contours.iter().flatten() {
-        let offset = point.dot(normal);
-        min_offset = min_offset.min(offset);
-        max_offset = max_offset.max(offset);
-    }
-
-    if !min_offset.is_finite() || !max_offset.is_finite() {
+    let Some((min_offset, max_offset)) = fill_offset_bounds(contours, normal) else {
         return Vec::new();
-    }
+    };
 
     let mut strokes = Vec::new();
     let mut row = 0usize;
     let mut offset = (min_offset / spacing).floor() * spacing;
     while offset <= max_offset + spacing * 0.5 {
-        let mut intervals =
-            fill_intervals_at_offset(&contours, region.rule, direction, normal, offset);
-        intervals.sort_by(|a, b| a.0.total_cmp(&b.0));
-        if alternate_direction && row % 2 == 1 {
-            intervals.reverse();
-        }
-
-        for (a, b) in intervals {
-            if b - a <= CORNER_EPSILON {
-                continue;
+        for segment in
+            fill_row_segments(contours, rule, direction, normal, offset, alternate_direction, row)
+        {
+            if let Some(stroke) = stroke_from_polyline(vec![segment.start, segment.end]) {
+                strokes.push(stroke);
             }
-            let (start_projection, end_projection) =
-                if alternate_direction && row % 2 == 1 { (b, a) } else { (a, b) };
-            let start = direction * start_projection + normal * offset;
-            let end = direction * end_projection + normal * offset;
-            strokes.push(Stroke::new(vec![Segment::line(start, end)]));
         }
 
         row += 1;
@@ -462,6 +469,88 @@ fn fill_hatch_strokes(
     }
 
     strokes
+}
+
+fn fill_continuous_zigzag_strokes(
+    contours: &[Vec<Vec2>],
+    rule: FillRule,
+    angle_degrees: f32,
+    settings: &ToolSettings,
+) -> Vec<Stroke> {
+    let angle = angle_degrees.to_radians();
+    let direction = vec2(angle.cos(), angle.sin()).normalize_or_zero();
+    let normal = vec2(-direction.y, direction.x);
+    let spacing = fill_spacing_mm(settings.fill_density_percent);
+    let Some((min_offset, max_offset)) = fill_offset_bounds(contours, normal) else {
+        return Vec::new();
+    };
+
+    let mut finished = Vec::new();
+    let mut active_polylines: Vec<Vec<Vec2>> = Vec::new();
+    let mut row = 0usize;
+    let mut offset = (min_offset / spacing).floor() * spacing;
+    while offset <= max_offset + spacing * 0.5 {
+        let row_segments = fill_row_segments(contours, rule, direction, normal, offset, true, row);
+        let mut matches = Vec::new();
+        for (active_index, polyline) in active_polylines.iter().enumerate() {
+            let Some(current_end) = polyline.last().copied() else {
+                continue;
+            };
+            for (segment_index, segment) in row_segments.iter().copied().enumerate() {
+                let connector_length = current_end.distance(segment.start);
+                if connector_length > spacing * CONTINUOUS_ZIGZAG_CONNECTOR_FACTOR {
+                    continue;
+                }
+                if connector_stays_inside_fill_region(
+                    current_end,
+                    segment.start,
+                    contours,
+                    rule,
+                    FILL_CONNECTOR_SAMPLE_STEP_MM,
+                ) {
+                    matches.push((connector_length, active_index, segment_index));
+                }
+            }
+        }
+        matches.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        let mut matched_active = vec![None; active_polylines.len()];
+        let mut matched_segments = vec![None; row_segments.len()];
+        for (_, active_index, segment_index) in matches {
+            if matched_active[active_index].is_some() || matched_segments[segment_index].is_some() {
+                continue;
+            }
+            matched_active[active_index] = Some(segment_index);
+            matched_segments[segment_index] = Some(active_index);
+        }
+
+        let mut remaining_segments = row_segments.into_iter().map(Some).collect::<Vec<_>>();
+        let mut next_active = Vec::new();
+        for (active_index, polyline) in active_polylines.into_iter().enumerate() {
+            if let Some(segment_index) = matched_active[active_index] {
+                let Some(segment) = remaining_segments[segment_index].take() else {
+                    continue;
+                };
+                let mut continued = polyline;
+                append_polyline_point(&mut continued, segment.start);
+                append_polyline_point(&mut continued, segment.end);
+                next_active.push(continued);
+            } else if let Some(stroke) = stroke_from_polyline(polyline) {
+                finished.push(stroke);
+            }
+        }
+
+        for segment in remaining_segments.into_iter().flatten() {
+            next_active.push(vec![segment.start, segment.end]);
+        }
+
+        active_polylines = next_active;
+        row += 1;
+        offset += spacing;
+    }
+
+    finished.extend(active_polylines.into_iter().filter_map(stroke_from_polyline));
+    finished
 }
 
 fn fill_spacing_mm(density_percent: f32) -> f32 {
@@ -474,6 +563,131 @@ fn closed_polyline(mut points: Vec<Vec2>) -> Vec<Vec2> {
         points.push(points[0]);
     }
     points
+}
+
+fn fill_offset_bounds(contours: &[Vec<Vec2>], normal: Vec2) -> Option<(f32, f32)> {
+    let mut min_offset = f32::INFINITY;
+    let mut max_offset = f32::NEG_INFINITY;
+
+    for point in contours.iter().flatten() {
+        let offset = point.dot(normal);
+        min_offset = min_offset.min(offset);
+        max_offset = max_offset.max(offset);
+    }
+
+    if min_offset.is_finite() && max_offset.is_finite() {
+        Some((min_offset, max_offset))
+    } else {
+        None
+    }
+}
+
+fn fill_row_segments(
+    contours: &[Vec<Vec2>],
+    rule: FillRule,
+    direction: Vec2,
+    normal: Vec2,
+    offset: f32,
+    alternate_direction: bool,
+    row: usize,
+) -> Vec<DirectedFillSegment> {
+    let mut intervals = fill_intervals_at_offset(contours, rule, direction, normal, offset);
+    intervals.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if alternate_direction && row % 2 == 1 {
+        intervals.reverse();
+    }
+
+    let reverse_row = alternate_direction && row % 2 == 1;
+    intervals
+        .into_iter()
+        .filter_map(|(a, b)| {
+            if b - a <= CORNER_EPSILON {
+                return None;
+            }
+            let (start_projection, end_projection) = if reverse_row { (b, a) } else { (a, b) };
+            Some(DirectedFillSegment {
+                start: direction * start_projection + normal * offset,
+                end: direction * end_projection + normal * offset,
+            })
+        })
+        .collect()
+}
+
+fn append_polyline_point(points: &mut Vec<Vec2>, point: Vec2) {
+    if points.last().is_some_and(|last| points_match(*last, point)) {
+        return;
+    }
+    points.push(point);
+}
+
+fn stroke_from_polyline(points: Vec<Vec2>) -> Option<Stroke> {
+    let mut deduped = Vec::new();
+    for point in points {
+        append_polyline_point(&mut deduped, point);
+    }
+    if deduped.len() < 2 {
+        return None;
+    }
+
+    let segments = deduped
+        .windows(2)
+        .filter_map(|window| {
+            if window[0].distance_squared(window[1]) <= CORNER_EPSILON.powi(2) {
+                None
+            } else {
+                Some(Segment::line(window[0], window[1]))
+            }
+        })
+        .collect::<Vec<_>>();
+    if segments.is_empty() { None } else { Some(Stroke::new(segments)) }
+}
+
+fn connector_stays_inside_fill_region(
+    start: Vec2,
+    end: Vec2,
+    contours: &[Vec<Vec2>],
+    rule: FillRule,
+    sample_step_mm: f32,
+) -> bool {
+    if points_match(start, end) {
+        return true;
+    }
+
+    let length = start.distance(end);
+    let steps = (length / sample_step_mm.max(CORNER_EPSILON)).ceil() as usize;
+    let steps = steps.max(1);
+    for step in 0..=steps {
+        let t = step as f32 / steps as f32;
+        let point = start.lerp(end, t);
+        if !fill_region_contains_point(contours, rule, point, FILL_CONNECTOR_TOLERANCE_MM) {
+            return false;
+        }
+    }
+    true
+}
+
+fn fill_region_contains_point(
+    contours: &[Vec<Vec2>],
+    rule: FillRule,
+    point: Vec2,
+    tolerance_mm: f32,
+) -> bool {
+    if point_is_on_fill_contour(contours, point, tolerance_mm) {
+        return true;
+    }
+
+    fill_intervals_at_offset(contours, rule, vec2(1.0, 0.0), vec2(0.0, 1.0), point.y)
+        .into_iter()
+        .any(|(start, end)| point.x >= start - tolerance_mm && point.x <= end + tolerance_mm)
+}
+
+fn point_is_on_fill_contour(contours: &[Vec<Vec2>], point: Vec2, tolerance_mm: f32) -> bool {
+    let tolerance_sq = tolerance_mm.powi(2);
+    contours.iter().any(|contour| {
+        contour.windows(2).any(|edge| {
+            polyline_point_to_segment_distance_sq(point, edge[0], edge[1]) <= tolerance_sq
+        })
+    })
 }
 
 fn fill_intervals_at_offset(
@@ -1435,6 +1649,57 @@ mod tests {
         }
     }
 
+    fn square_loop(min: Vec2, max: Vec2, clockwise: bool) -> Stroke {
+        let points = if clockwise {
+            vec![
+                vec2(min.x, min.y),
+                vec2(min.x, max.y),
+                vec2(max.x, max.y),
+                vec2(max.x, min.y),
+                vec2(min.x, min.y),
+            ]
+        } else {
+            vec![
+                vec2(min.x, min.y),
+                vec2(max.x, min.y),
+                vec2(max.x, max.y),
+                vec2(min.x, max.y),
+                vec2(min.x, min.y),
+            ]
+        };
+        Stroke::new(
+            points.windows(2).map(|window| Segment::line(window[0], window[1])).collect::<Vec<_>>(),
+        )
+    }
+
+    fn square_fill_region() -> FillRegion {
+        FillRegion::new(
+            vec![square_loop(vec2(0.0, 0.0), vec2(10.0, 10.0), false)],
+            FillRule::NonZero,
+        )
+    }
+
+    fn donut_fill_region_even_odd() -> FillRegion {
+        FillRegion::new(
+            vec![
+                square_loop(vec2(0.0, 0.0), vec2(12.0, 12.0), false),
+                square_loop(vec2(4.0, 4.0), vec2(8.0, 8.0), false),
+            ],
+            FillRule::EvenOdd,
+        )
+    }
+
+    fn fill_test_settings(fill_pattern: FillPattern) -> ToolSettings {
+        ToolSettings {
+            printable_area: PrintableArea::new(100.0, 100.0),
+            print_start_mode: PrintStartMode::DirectFromCurrentPosition,
+            fill_pattern,
+            fill_density_percent: 100.0,
+            fill_angle_degrees: 0.0,
+            ..ToolSettings::default()
+        }
+    }
+
     #[derive(Debug, Clone, Copy)]
     struct DirectedDeviationMetrics {
         max_distance_mm: f32,
@@ -1961,6 +2226,58 @@ mod tests {
         assert!(plan.stats.stroke_count > 1);
         assert!(plan.stats.drawing_distance_mm > 10.0);
         assert!(plan.gcode_lines.iter().any(|line| line.starts_with("G1 X")));
+    }
+
+    #[test]
+    fn continuous_zigzag_keeps_rectangle_fill_in_one_stroke() {
+        let region = square_fill_region();
+        let contours = flattened_fill_contours(&region);
+        let segmented = fill_hatch_strokes(
+            &contours,
+            region.rule,
+            0.0,
+            &fill_test_settings(FillPattern::Zigzag),
+            true,
+        );
+        let continuous = fill_continuous_zigzag_strokes(
+            &contours,
+            region.rule,
+            0.0,
+            &fill_test_settings(FillPattern::ContinuousZigzag),
+        );
+
+        assert!(segmented.len() > 1);
+        assert_eq!(continuous.len(), 1);
+        assert!(continuous[0].segments.len() > segmented[0].segments.len());
+    }
+
+    #[test]
+    fn continuous_zigzag_avoids_crossing_even_odd_holes() {
+        let region = donut_fill_region_even_odd();
+        let contours = flattened_fill_contours(&region);
+        let strokes = fill_continuous_zigzag_strokes(
+            &contours,
+            region.rule,
+            0.0,
+            &fill_test_settings(FillPattern::ContinuousZigzag),
+        );
+
+        assert!(strokes.len() > 1);
+        for stroke in &strokes {
+            for segment in &stroke.segments {
+                let midpoint = segment.start_point().lerp(segment.end_point(), 0.5);
+                assert!(
+                    fill_region_contains_point(
+                        &contours,
+                        region.rule,
+                        midpoint,
+                        FILL_CONNECTOR_TOLERANCE_MM
+                    ),
+                    "segment midpoint {:?} should stay inside the filled region",
+                    midpoint,
+                );
+            }
+        }
     }
 
     #[test]

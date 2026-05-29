@@ -1136,6 +1136,11 @@ impl PenarticApp {
                                         FillPattern::Zigzag,
                                         text.fill_pattern_zigzag,
                                     );
+                                    ui.selectable_value(
+                                        &mut self.settings.fill_pattern,
+                                        FillPattern::ContinuousZigzag,
+                                        text.fill_pattern_continuous_zigzag,
+                                    );
                                 });
                             settings_changed |= previous_pattern != self.settings.fill_pattern;
                             settings_changed |= drag_value_row(
@@ -1923,6 +1928,7 @@ fn fill_pattern_label(pattern: FillPattern, text: &Strings) -> &'static str {
         FillPattern::Lines => text.fill_pattern_lines,
         FillPattern::Crosshatch => text.fill_pattern_crosshatch,
         FillPattern::Zigzag => text.fill_pattern_zigzag,
+        FillPattern::ContinuousZigzag => text.fill_pattern_continuous_zigzag,
     }
 }
 

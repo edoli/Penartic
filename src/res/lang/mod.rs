@@ -115,6 +115,7 @@ pub struct Strings {
     pub fill_pattern_lines: &'static str,
     pub fill_pattern_crosshatch: &'static str,
     pub fill_pattern_zigzag: &'static str,
+    pub fill_pattern_continuous_zigzag: &'static str,
     pub fill_density: &'static str,
     pub fill_angle: &'static str,
     pub fill_density_hint: &'static str,

@@ -147,6 +147,7 @@ pub enum FillPattern {
     Lines,
     Crosshatch,
     Zigzag,
+    ContinuousZigzag,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
