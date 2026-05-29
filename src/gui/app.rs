@@ -4,6 +4,7 @@ use super::fonts::LoadedFallbackFonts;
 use std::time::Duration;
 
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 
 use super::layout::{Size, UiLayoutExt};
 use super::viewer::{
@@ -12,7 +13,9 @@ use super::viewer::{
 };
 use crate::{
     paths,
-    platform::device::{ConnectionState, DeviceController, PrintState},
+    platform::device::{
+        ConnectionMethod, ConnectionState, DeviceController, DevicePreferences, PrintState,
+    },
     plot::{
         gcode,
         model::{
@@ -39,6 +42,19 @@ const CONTROL_BUTTON_WIDTH: f32 = 44.0;
 const CONTROL_BUTTON_HEIGHT: f32 = 44.0;
 const CONTROL_GRID_SPACING: f32 = 4.0;
 const APP_STATE_STORAGE_KEY: &str = eframe::APP_KEY;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct PersistedAppState {
+    language: Language,
+    device: DevicePreferences,
+}
+
+impl Default for PersistedAppState {
+    fn default() -> Self {
+        Self { language: Language::default(), device: DevicePreferences::default() }
+    }
+}
 
 pub struct PenarticApp {
     language: Language,
@@ -104,6 +120,15 @@ pub struct StartupSvg {
     pub bytes: Vec<u8>,
 }
 
+fn load_persisted_app_state(storage: &dyn eframe::Storage) -> Option<PersistedAppState> {
+    eframe::get_value::<PersistedAppState>(storage, APP_STATE_STORAGE_KEY).or_else(|| {
+        storage.get_string(APP_STATE_STORAGE_KEY).and_then(|value| {
+            Language::from_storage_key(&value)
+                .map(|language| PersistedAppState { language, ..PersistedAppState::default() })
+        })
+    })
+}
+
 impl SvgPlacementState {
     fn for_svg(svg: &LoadedSvg, printable_area: PrintableArea) -> Self {
         let placement = svg.document.centered_native_placement(printable_area);
@@ -150,13 +175,12 @@ impl PenarticApp {
         #[cfg(target_arch = "wasm32")]
         fonts::apply_fallback_fonts(&cc.egui_ctx, fonts::web_fallback_fonts());
 
-        let language = cc
-            .storage
-            .and_then(|storage| storage.get_string(APP_STATE_STORAGE_KEY))
-            .and_then(|value| Language::from_storage_key(&value))
-            .unwrap_or_default();
-        let mut device = DeviceController::new(language);
-        device.refresh_ports();
+        let persisted = cc.storage.and_then(load_persisted_app_state).unwrap_or_default();
+        let language = persisted.language;
+        let mut device = DeviceController::new(language, persisted.device);
+        if device.connection_method() == ConnectionMethod::Serial {
+            device.refresh_ports();
+        }
 
         let mut app = Self {
             language,
@@ -706,54 +730,106 @@ impl PenarticApp {
                                 self.device.connection_state(),
                                 ConnectionState::Disconnected
                             );
-                            let mut use_esp3d = self.device.use_esp3d();
-                            if ui
-                                .add_enabled(
-                                    can_change_connection_target,
-                                    egui::Checkbox::new(&mut use_esp3d, text.use_esp3d_connection),
-                                )
-                                .changed()
+                            ui.label(text.connection_method);
+                            let previous_method = self.device.connection_method();
+                            let mut connection_method = previous_method;
+                            ui.add_enabled_ui(can_change_connection_target, |ui| {
+                                egui::ComboBox::from_id_salt("connection-method-combo")
+                                    .width(ui.available_width())
+                                    .selected_text(connection_method.label(self.language))
+                                    .show_ui(ui, |ui| {
+                                        for method in ConnectionMethod::available() {
+                                            ui.selectable_value(
+                                                &mut connection_method,
+                                                *method,
+                                                method.label(self.language),
+                                            );
+                                        }
+                                    });
+                            });
+                            if can_change_connection_target && connection_method != previous_method
                             {
-                                self.device.set_use_esp3d(use_esp3d);
-                            }
-                            if self.device.use_esp3d() {
-                                ui.label(text.esp3d_address);
-                                let mut endpoint = self.device.esp3d_endpoint().to_owned();
-                                if ui
-                                    .add_enabled(
-                                        can_change_connection_target,
-                                        egui::TextEdit::singleline(&mut endpoint)
-                                            .desired_width(ui.available_width()),
-                                    )
-                                    .changed()
-                                {
-                                    self.device.set_esp3d_endpoint(endpoint);
+                                self.device.set_connection_method(connection_method);
+                                if connection_method == ConnectionMethod::Serial {
+                                    self.device.refresh_ports();
                                 }
                             }
 
-                            if ui.button(text.refresh_ports).clicked() {
-                                self.device.refresh_ports();
-                            }
+                            match self.device.connection_method() {
+                                ConnectionMethod::Serial => {
+                                    if ui
+                                        .add_enabled(
+                                            can_change_connection_target,
+                                            egui::Button::new(text.refresh_ports),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.device.refresh_ports();
+                                    }
 
-                            let show_serial_ports = !self.device.use_esp3d();
-
-                            if show_serial_ports {
-                                let ports = self.device.ports().to_vec();
-                                let combo_width = ui.available_width();
-                                egui::ComboBox::from_id_salt("serial-port-combo")
-                                    .width(combo_width)
-                                    .selected_text(
-                                        self.device.selected_port().unwrap_or(text.select_port),
-                                    )
-                                    .show_ui(ui, |ui| {
-                                        for port in ports {
-                                            let selected =
-                                                self.device.selected_port() == Some(port.as_str());
-                                            if ui.selectable_label(selected, &port).clicked() {
-                                                self.device.set_selected_port(Some(port.clone()));
+                                    let ports = self.device.serial_ports().to_vec();
+                                    let combo_width = ui.available_width();
+                                    egui::ComboBox::from_id_salt("serial-port-combo")
+                                        .width(combo_width)
+                                        .selected_text(
+                                            self.device
+                                                .selected_serial_port()
+                                                .unwrap_or(text.select_port),
+                                        )
+                                        .show_ui(ui, |ui| {
+                                            for port in ports {
+                                                let selected = self.device.selected_serial_port()
+                                                    == Some(port.as_str());
+                                                if ui.selectable_label(selected, &port).clicked() {
+                                                    self.device.set_selected_serial_port(Some(
+                                                        port.clone(),
+                                                    ));
+                                                }
                                             }
-                                        }
-                                    });
+                                        });
+                                }
+                                ConnectionMethod::Esp3d => {
+                                    ui.label(text.esp3d_address);
+                                    let mut endpoint = self.device.esp3d_endpoint().to_owned();
+                                    if ui
+                                        .add_enabled(
+                                            can_change_connection_target,
+                                            egui::TextEdit::singleline(&mut endpoint)
+                                                .desired_width(ui.available_width()),
+                                        )
+                                        .changed()
+                                    {
+                                        self.device.set_esp3d_endpoint(endpoint);
+                                    }
+                                }
+                                ConnectionMethod::OctoPrint => {
+                                    ui.label(text.octoprint_address);
+                                    let mut base_url = self.device.octoprint_base_url().to_owned();
+                                    if ui
+                                        .add_enabled(
+                                            can_change_connection_target,
+                                            egui::TextEdit::singleline(&mut base_url)
+                                                .desired_width(ui.available_width()),
+                                        )
+                                        .changed()
+                                    {
+                                        self.device.set_octoprint_base_url(base_url);
+                                    }
+
+                                    ui.label(text.octoprint_api_key);
+                                    let mut api_key = self.device.octoprint_api_key().to_owned();
+                                    if ui
+                                        .add_enabled(
+                                            can_change_connection_target,
+                                            egui::TextEdit::singleline(&mut api_key)
+                                                .password(true)
+                                                .desired_width(ui.available_width()),
+                                        )
+                                        .changed()
+                                    {
+                                        self.device.set_octoprint_api_key(api_key);
+                                    }
+                                }
                             }
 
                             let can_connect = matches!(
@@ -1502,7 +1578,11 @@ impl eframe::App for PenarticApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        storage.set_string(APP_STATE_STORAGE_KEY, self.language.storage_key().to_owned());
+        eframe::set_value(
+            storage,
+            APP_STATE_STORAGE_KEY,
+            &PersistedAppState { language: self.language, device: self.device.preferences() },
+        );
     }
 }
 

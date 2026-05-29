@@ -5,7 +5,7 @@
 Penartic is a Rust-based pen plotting and repurposed-3D-printer drawing application.
 The app converts SVG input into an intermediate representation (IR) and then into motion/G-code,
 previews the motion in a 3D viewport,
-and can optionally stream the job to a connected serial device.
+and can optionally send the job to a connected device over serial, ESP3D, or OctoPrint.
 
 The product must remain useful even when no device is connected:
 
@@ -27,7 +27,7 @@ The product must remain useful even when no device is connected:
 
 ### 2.2 Connected workflow
 
-1. Refresh and select a serial port.
+1. Choose the connection method, then enter the method-specific settings (serial port, ESP3D endpoint, or OctoPrint base URL and API key).
 2. Connect to the device.
 3. Probe firmware information (`M115`) and configuration (`M503`) on a best-effort basis.
 4. If build volume information is detected, update the printable area and rebuild the toolpath without rewriting the current SVG placement or scale.
@@ -57,7 +57,10 @@ The product must remain useful even when no device is connected:
 | `src/paths/svg_parser.rs` | Parse SVG with `usvg`, sample visible SVG paths into path IR, surface SVG-specific warnings, and apply persistent placement transforms |
 | `src/plot/gcode.rs` | Convert IR into preview motion segments, generate fill hatch paths, apply optional tangent-based join rounding, and emit linear, G2/G3, and/or G5 G-code |
 | `src/plot/model.rs` | Shared settings, motion, and toolpath data structures |
-| `src/platform/device.rs` | Native serial probing and streaming, plus native/web capability split |
+| `src/platform/device/mod.rs` | Transport-agnostic device controller state, connection preferences, worker dispatch, shared parsing/helpers, and device-facing app API |
+| `src/platform/device/serial.rs` | Native serial and web-serial workers, ACK-driven streaming, and serial-specific probing |
+| `src/platform/device/esp3d.rs` | Native/web ESP3D WebSocket or HTTP workers, queue management, and ESP3D endpoint normalization |
+| `src/platform/device/octoprint.rs` | Native OctoPrint REST worker, printer/profile probing, command dispatch, job upload/start/cancel, and OctoPrint-specific state handling |
 | `src/platform/crash.rs` | Native panic hook and runtime error log persistence |
 | `src/validation.rs` | Native UI screenshot validation wrapper that captures the egui viewport after a delay |
 | `src/res/colors.rs` | Shared UI and preview color tokens |
@@ -67,7 +70,7 @@ The product must remain useful even when no device is connected:
 
 ### 4.1 UI layout
 
-- left sidebar: fixed-width, vertically scrollable language selector, device controls, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
+- left sidebar: fixed-width, vertically scrollable language selector, device controls, connection-method selector, method-specific connection settings, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
 - sidebar action buttons use a slightly taller shared height, paired device/job actions are laid out in evenly sized columns with explicit spacing, the print-start homing toggle sits directly under the print action row, long firmware text stays on one line with hover access to the full value, the upper sidebar controls scroll independently from a left-aligned device log section that fills the remaining sidebar height, advanced G2/G3, G5, corner-smoothing, and SVG fill controls can be toggled from settings, and sidebar content growth must not resize the 3D preview when the window size stays fixed
 - central panel: a full-size 3D preview canvas with a translucent top object toolbar for move/scale/rotate selection, numeric X/Y position, independent X/Y scale percentages, local width/height millimeter edits, a default-on aspect-ratio lock for scale edits, rotation edits, and selected-object deletion; mode-specific gizmos provide move arrows, scale handles, or a rotation ring, and a translucent bottom overlay keeps playback buttons and the full-width timeline slider visible in smaller windows
 - the preview overlay can command a connected idle device to move to the current timeline pen position and can toggle lifted travel paths or the placed SVG bounding box
@@ -97,8 +100,9 @@ updated with the same value to avoid WGPU validation errors.
 
 ## 5. Fonts and localization
 
-- the UI supports English and Korean, defaults to English, persists the selected language through eframe storage on native and web builds, and sources localized strings from `src/res/lang/english.rs` and `src/res/lang/korean.rs`
+- the UI supports English and Korean, defaults to English, persists the selected language plus the last-used device connection preferences through eframe storage on native and web builds, and sources localized strings from `src/res/lang/english.rs` and `src/res/lang/korean.rs`
 - language persistence relies on `eframe`'s `persistence` feature, which maps to native app storage on desktop builds and browser local storage on web builds
+- persisted device preferences include the selected connection method, serial port, ESP3D endpoint, and OctoPrint base URL/API key so the last-used device configuration is restored on restart
 - Korean mode still needs CJK-capable fallback fonts for the UI and warning text
 - native builds asynchronously scan platform font locations and an optional `fallback_font.ttf`
   next to the executable
@@ -108,6 +112,7 @@ updated with the same value to avoid WGPU validation errors.
 
 ## 6. Device integration
 
+- device integration is transport-based: `DeviceController` keeps transport-agnostic UI state and dispatches work to dedicated serial, ESP3D, or OctoPrint workers
 - serial support uses `serialport` on native builds and the browser Web Serial API on web builds
 - native builds can alternatively connect through ESP3D over the Data WebSocket using the `arduino`
   subprotocol; `http://192.168.0.112/` is the default UI address and resolves to
@@ -118,6 +123,11 @@ updated with the same value to avoid WGPU validation errors.
   subprotocol and endpoint normalization, but browsers block mixed-content `ws://` connections from
   an `https://` page, so hosted web builds require a `wss://` endpoint unless the app is served
   locally over `http://`/`localhost`
+- native builds can also connect to OctoPrint with a base URL and API key; the worker verifies the server,
+  reads the current printer profile for printable area when available, sends manual G-code through
+  `/api/printer/command`, uploads generated jobs to `/api/files/local`, starts the uploaded file as a print,
+  polls `/api/printer` and `/api/job` for readiness/progress, and cancels through `POST /api/job`
+- OctoPrint is intentionally native-only for now; web builds expose the selector only for supported methods
 - the device controller keeps the app usable when no port is available
 - firmware/build-volume probing is intentionally best-effort because printer responses vary by firmware
 - native serial connection probing sends `M115`, `M503`, and `M211`; native ESP3D probing sends the
@@ -131,6 +141,7 @@ updated with the same value to avoid WGPU validation errors.
 - detected printable area changes are applied only when the reported size actually changes, to avoid redundant rebuild churn
 - printable area changes rebuild the preview/toolpath but do not overwrite user-adjusted SVG object placement, independent X/Y scale, local size, or rotation
 - printing state is tracked explicitly so start/stop/connect/disconnect controls can be enabled only when valid
+- the connection-method selector is only editable while disconnected, and each method shows only its own relevant settings inputs
 - the UI keeps polling the native serial worker while a device is connected or connecting, so asynchronous probe responses can update settings after the initial click frame
 - direct jog/home controls send synchronized metric movement commands for XY and Z when no print job is active
 - the manual control UI also exposes a Motors Off action that waits for queued motion to finish and then sends `M84` to release the steppers
@@ -185,6 +196,8 @@ Current non-goals:
 | 3D preview | Yes | Yes |
 | G-code copy/export flow | Yes | Yes |
 | Serial device connection | Yes | Yes, through Web Serial |
+| ESP3D device connection | Yes | Yes |
+| OctoPrint device connection | Yes | No |
 | Firmware probing | Yes | Yes, best-effort through Web Serial |
 | Local CJK font scanning | Yes | No, uses bundled CJK font |
 | Crash log files | Yes | No |
