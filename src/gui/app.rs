@@ -42,6 +42,8 @@ const CONTROL_BUTTON_WIDTH: f32 = 44.0;
 const CONTROL_BUTTON_HEIGHT: f32 = 44.0;
 const CONTROL_GRID_SPACING: f32 = 4.0;
 const APP_STATE_STORAGE_KEY: &str = eframe::APP_KEY;
+const DEFAULT_GCODE_FILE_NAME: &str = "penartic-job.gcode";
+const GCODE_VIEWPORT_ID_SALT: &str = "gcode_viewport";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -81,10 +83,15 @@ pub struct PenarticApp {
     show_drawing_bounds: bool,
     jog_step_mm: f32,
     error_message: Option<String>,
+    show_gcode_window: bool,
+    focus_gcode_window: bool,
+    gcode_window_text: String,
     #[cfg(not(target_arch = "wasm32"))]
     pending_fallback_fonts: Option<mpsc::Receiver<LoadedFallbackFonts>>,
     #[cfg(target_arch = "wasm32")]
     pending_svg_pick: Option<Promise<Option<PickedWebSvg>>>,
+    #[cfg(target_arch = "wasm32")]
+    pending_gcode_save: Option<Promise<Result<(), String>>>,
 }
 
 #[derive(Clone)]
@@ -210,10 +217,15 @@ impl PenarticApp {
             show_drawing_bounds: true,
             jog_step_mm: 1.0,
             error_message: startup_error,
+            show_gcode_window: false,
+            focus_gcode_window: false,
+            gcode_window_text: String::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_fallback_fonts: fonts::spawn_fallback_font_loader(),
             #[cfg(target_arch = "wasm32")]
             pending_svg_pick: None,
+            #[cfg(target_arch = "wasm32")]
+            pending_gcode_save: None,
         };
 
         if let Some(svg) = startup_svg {
@@ -362,6 +374,7 @@ impl PenarticApp {
 
         if self.svg_objects.is_empty() {
             self.toolpath_plan = None;
+            self.gcode_window_text.clear();
             return;
         }
 
@@ -386,6 +399,9 @@ impl PenarticApp {
         self.preview_progress = 1.0;
         self.preview_playing = false;
         self.error_message = None;
+        if self.show_gcode_window {
+            self.refresh_gcode_window_text();
+        }
     }
 
     fn handle_device_updates(&mut self) {
@@ -412,6 +428,100 @@ impl PenarticApp {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn handle_web_file_pick(&mut self) {}
+
+    #[cfg(target_arch = "wasm32")]
+    fn handle_web_gcode_save(&mut self) {
+        let Some(promise) = self.pending_gcode_save.as_ref() else {
+            return;
+        };
+        let Some(result) = promise.ready().cloned() else {
+            return;
+        };
+
+        self.pending_gcode_save = None;
+        if let Err(error) = result {
+            self.error_message = Some(error);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn handle_web_gcode_save(&mut self) {}
+
+    fn refresh_gcode_window_text(&mut self) {
+        self.gcode_window_text =
+            self.toolpath_plan.as_ref().map(ToolpathPlan::gcode_text).unwrap_or_default();
+    }
+
+    fn open_gcode_window(&mut self) {
+        self.refresh_gcode_window_text();
+        self.show_gcode_window = true;
+        self.focus_gcode_window = true;
+    }
+
+    fn current_gcode_save_file_name(&self) -> String {
+        self.toolpath_plan
+            .as_ref()
+            .map(|plan| gcode_save_file_name(&plan.source_name, self.svg_objects.len()))
+            .unwrap_or_else(|| DEFAULT_GCODE_FILE_NAME.to_owned())
+    }
+
+    fn is_gcode_save_pending(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.pending_gcode_save.is_some()
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            false
+        }
+    }
+
+    fn save_gcode(&mut self) {
+        let suggested_name = self.current_gcode_save_file_name();
+        let Some(gcode_text) = self.toolpath_plan.as_ref().map(ToolpathPlan::gcode_text) else {
+            return;
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            if self.pending_gcode_save.is_some() {
+                return;
+            }
+
+            let bytes = gcode_text.into_bytes();
+            let title = self.text().save_gcode.to_owned();
+            let save_failed = self.text().failed_to_save_gcode.to_owned();
+            self.pending_gcode_save = Some(Promise::spawn_local(async move {
+                let Some(file) = rfd::AsyncFileDialog::new()
+                    .set_title(&title)
+                    .set_file_name(&suggested_name)
+                    .add_filter("G-code", &["gcode"])
+                    .save_file()
+                    .await
+                else {
+                    return Ok(());
+                };
+
+                file.write(&bytes).await.map_err(|error| format!("{save_failed}: {error}"))
+            }));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(path) = rfd::FileDialog::new()
+                .set_title(self.text().save_gcode)
+                .set_file_name(&suggested_name)
+                .add_filter("G-code", &["gcode"])
+                .save_file()
+            else {
+                return;
+            };
+
+            if let Err(error) = std::fs::write(path, gcode_text) {
+                self.error_message = Some(format!("{}: {error}", self.text().failed_to_save_gcode));
+            }
+        }
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn handle_fallback_fonts(&mut self, ctx: &egui::Context) {
@@ -693,9 +803,42 @@ impl PenarticApp {
                         }
                         ui.small(text.load_svg_hint);
 
-                        if let Some(plan) = &self.toolpath_plan {
-                            if ui.button(text.copy_gcode).clicked() {
-                                ui.ctx().copy_text(plan.gcode_text());
+                        if self.toolpath_plan.is_some() {
+                            let mut open_gcode_window = false;
+                            let mut copy_gcode = false;
+                            let mut save_gcode = false;
+                            let save_enabled = !self.is_gcode_save_pending();
+                            ui.columns_sized(
+                                [Size::remainder(1.0), Size::remainder(1.0), Size::remainder(1.0)],
+                                |columns| {
+                                    if columns[0].button(text.view_gcode).clicked() {
+                                        open_gcode_window = true;
+                                    }
+                                    if columns[1].button(text.copy_gcode).clicked() {
+                                        copy_gcode = true;
+                                    }
+                                    if columns[2]
+                                        .add_enabled(
+                                            save_enabled,
+                                            egui::Button::new(text.save_gcode),
+                                        )
+                                        .clicked()
+                                    {
+                                        save_gcode = true;
+                                    }
+                                },
+                            );
+
+                            if open_gcode_window {
+                                self.open_gcode_window();
+                            }
+                            if copy_gcode {
+                                if let Some(plan) = self.toolpath_plan.as_ref() {
+                                    ui.ctx().copy_text(plan.gcode_text());
+                                }
+                            }
+                            if save_gcode {
+                                self.save_gcode();
                             }
                         }
 
@@ -1573,12 +1716,122 @@ impl PenarticApp {
                 });
             });
     }
+
+    fn show_gcode_window_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_gcode_window {
+            return;
+        }
+
+        let text = self.text();
+        let title = text.view_gcode;
+        let mut copy_gcode = false;
+        let mut save_gcode = false;
+        let has_gcode = self.toolpath_plan.is_some();
+        let save_enabled = has_gcode && !self.is_gcode_save_pending();
+        let gcode_window_text = self.gcode_window_text.as_str();
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mut open = self.show_gcode_window;
+            egui::Window::new(title)
+                .id(egui::Id::new(GCODE_VIEWPORT_ID_SALT))
+                .order(egui::Order::Foreground)
+                .open(&mut open)
+                .default_size([900.0, 680.0])
+                .min_size([520.0, 360.0])
+                .show(ctx, |ui| {
+                    show_gcode_window_contents(
+                        ui,
+                        has_gcode,
+                        save_enabled,
+                        &mut copy_gcode,
+                        &mut save_gcode,
+                        gcode_window_text,
+                        text,
+                    );
+                });
+            self.show_gcode_window = open;
+            self.focus_gcode_window = false;
+
+            if copy_gcode {
+                ctx.copy_text(self.gcode_window_text.clone());
+            }
+            if save_gcode {
+                self.save_gcode();
+            }
+            return;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let viewport_id = gcode_viewport_id();
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut show_gcode_window = self.show_gcode_window;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        ctx.show_viewport_immediate(
+            viewport_id,
+            egui::ViewportBuilder::default()
+                .with_title(title)
+                .with_inner_size([900.0, 680.0])
+                .with_min_inner_size([520.0, 360.0]),
+            |ui, class| {
+                if ui.input(|input| input.viewport().close_requested()) {
+                    show_gcode_window = false;
+                    return;
+                }
+
+                if class == egui::ViewportClass::EmbeddedWindow {
+                    show_gcode_window_contents(
+                        ui,
+                        has_gcode,
+                        save_enabled,
+                        &mut copy_gcode,
+                        &mut save_gcode,
+                        gcode_window_text,
+                        text,
+                    );
+                } else {
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        show_gcode_window_contents(
+                            ui,
+                            has_gcode,
+                            save_enabled,
+                            &mut copy_gcode,
+                            &mut save_gcode,
+                            gcode_window_text,
+                            text,
+                        );
+                    });
+                }
+            },
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.show_gcode_window = show_gcode_window;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.focus_gcode_window && self.show_gcode_window {
+            ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Focus);
+            self.focus_gcode_window = false;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if copy_gcode {
+                ctx.copy_text(self.gcode_window_text.clone());
+            }
+            if save_gcode {
+                self.save_gcode();
+            }
+        }
+    }
 }
 
 impl eframe::App for PenarticApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_dropped_files(ctx);
         self.handle_web_file_pick();
+        self.handle_web_gcode_save();
         self.handle_fallback_fonts(ctx);
         self.handle_device_updates();
         self.handle_object_shortcuts(ctx);
@@ -1593,7 +1846,7 @@ impl eframe::App for PenarticApp {
         }
 
         #[cfg(target_arch = "wasm32")]
-        if self.pending_svg_pick.is_some() {
+        if self.pending_svg_pick.is_some() || self.is_gcode_save_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
 
@@ -1606,6 +1859,7 @@ impl eframe::App for PenarticApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.show_sidebar(ui);
         self.show_central_panel(ui);
+        self.show_gcode_window_ui(ui.ctx());
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -2032,6 +2286,82 @@ fn printable_area_changed(current: PrintableArea, next: PrintableArea) -> bool {
         || (current.height_mm - next.height_mm).abs() > 0.01
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn gcode_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of(GCODE_VIEWPORT_ID_SALT)
+}
+
+fn show_gcode_window_contents(
+    ui: &mut egui::Ui,
+    has_gcode: bool,
+    save_enabled: bool,
+    copy_gcode: &mut bool,
+    save_gcode: &mut bool,
+    gcode_window_text: &str,
+    text: &'static Strings,
+) {
+    if !has_gcode {
+        ui.label(text.no_converted_svg);
+        return;
+    }
+
+    ui.horizontal(|ui| {
+        if ui.button(text.copy_gcode).clicked() {
+            *copy_gcode = true;
+        }
+        if ui.add_enabled(save_enabled, egui::Button::new(text.save_gcode)).clicked() {
+            *save_gcode = true;
+        }
+    });
+    ui.separator();
+
+    let available_size = ui.available_size();
+    let editor_width = available_size.x.max(1.0);
+    let editor_height = available_size.y.max(240.0);
+
+    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+        let mut selectable_text = gcode_window_text;
+        ui.add_sized(
+            [editor_width, editor_height],
+            egui::TextEdit::multiline(&mut selectable_text)
+                .id_salt("gcode-window-text")
+                .code_editor()
+                .cursor_at_end(false)
+                .desired_rows(24)
+                .desired_width(f32::INFINITY),
+        );
+    });
+}
+
+fn gcode_save_file_name(source_name: &str, source_count: usize) -> String {
+    if source_count != 1 {
+        return DEFAULT_GCODE_FILE_NAME.to_owned();
+    }
+
+    let stem = std::path::Path::new(source_name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::trim)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("penartic-job");
+    let sanitized_stem = stem
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+            {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect::<String>();
+    let sanitized_stem =
+        sanitized_stem.trim_matches(|ch: char| ch.is_whitespace() || ch == '.').to_owned();
+    let file_stem =
+        if sanitized_stem.is_empty() { "penartic-job" } else { sanitized_stem.as_str() };
+    format!("{file_stem}.gcode")
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -2088,5 +2418,20 @@ mod tests {
         assert_eq!(loaded.language, Language::Korean);
         assert_eq!(loaded.curve_output_mode, CurveOutputMode::default());
         assert_eq!(loaded.preview_view_mode, PreviewViewMode::default());
+    }
+
+    #[test]
+    fn gcode_save_file_name_uses_single_source_stem() {
+        assert_eq!(gcode_save_file_name("sample/sample_curve.svg", 1), "sample_curve.gcode");
+        assert_eq!(gcode_save_file_name("curve:demo.svg", 1), "curve_demo.gcode");
+    }
+
+    #[test]
+    fn gcode_save_file_name_falls_back_for_multi_source_jobs() {
+        assert_eq!(gcode_save_file_name("sample_curve.svg", 0), DEFAULT_GCODE_FILE_NAME);
+        assert_eq!(
+            gcode_save_file_name("sample_curve.svg, sample_cat.svg", 2),
+            DEFAULT_GCODE_FILE_NAME
+        );
     }
 }

@@ -23,7 +23,7 @@ The product must remain useful even when no device is connected:
 4. Start each SVG from its raw coordinate size interpreted as millimeters, centered once on load, then select individual SVG objects and adjust position, independent X/Y scale, local width/height in millimeters, and rotation from the object toolbar or preview gizmo controls when needed.
 5. Convert each SVG into reusable IR, combine the placed objects into one preview motion/G-code job, and avoid automatically rescaling existing SVG placements when printable area settings later change.
 6. Show the completed result immediately in the preview, switch between 2D top-down and 3D perspective views as needed, then scrub backward or replay it with the timeline slider using real motion time.
-7. Copy the generated G-code if needed.
+7. Open the generated G-code in a dedicated viewer when needed, then copy it to the clipboard or save it as a `.gcode` file.
 
 ### 2.2 Connected workflow
 
@@ -70,8 +70,8 @@ The product must remain useful even when no device is connected:
 
 ### 4.1 UI layout
 
-- left sidebar: fixed-width, vertically scrollable language selector, device controls, connection-method selector, method-specific connection settings, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
-- sidebar action buttons use a slightly taller shared height, paired device/job actions are laid out in evenly sized columns with explicit spacing, the print-start homing toggle sits directly under the print action row, long firmware text stays on one line with hover access to the full value, the upper sidebar controls scroll independently from a left-aligned device log section that fills the remaining sidebar height, advanced G2/G3, G5, corner-smoothing, and SVG fill controls can be toggled from settings, and sidebar content growth must not resize the preview canvas when the window size stays fixed
+- left sidebar: fixed-width, vertically scrollable language selector, SVG/G-code actions, device controls, connection-method selector, method-specific connection settings, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
+- sidebar action buttons use a slightly taller shared height, paired device/job actions are laid out in evenly sized columns with explicit spacing, generated jobs expose evenly sized View G-code / Copy G-code / Save G-code buttons near SVG loading, the View G-code action opens a dedicated secondary viewer window on native builds and a resizable embedded viewer window on web/embedded fallbacks that stays above preview overlays, the print-start homing toggle sits directly under the print action row, long firmware text stays on one line with hover access to the full value, the upper sidebar controls scroll independently from a left-aligned device log section that fills the remaining sidebar height, advanced G2/G3, G5, corner-smoothing, and SVG fill controls can be toggled from settings, and sidebar content growth must not resize the preview canvas when the window size stays fixed
 - central panel: a full-size preview canvas with a translucent top object toolbar for move/scale/rotate selection, numeric X/Y position, independent X/Y scale percentages, local width/height millimeter edits, a default-on aspect-ratio lock for scale edits, rotation edits, and selected-object deletion; mode-specific gizmos provide move arrows, scale handles, or a rotation ring, and a translucent bottom overlay keeps playback buttons, the 2D/3D view selector, and the full-width timeline slider visible in smaller windows
 - the preview overlay can command a connected idle device to move to the current timeline pen position, switch between 2D and 3D view modes, and toggle lifted travel paths or the placed SVG bounding box
 
