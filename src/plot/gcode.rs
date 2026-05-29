@@ -22,6 +22,14 @@ const ARC_DETECTION_TANGENT_MIN_DOT: f32 = 0.98;
 const MIN_DETECTABLE_ARC_SWEEP_RAD: f32 = 0.05;
 const MIN_FILL_SPACING_MM: f32 = 0.6;
 const MAX_FILL_SPACING_MM: f32 = 8.0;
+const POLYLINE_FIT_TOLERANCE_MM: f32 = 0.1;
+const MIN_POLYLINE_ARC_SEED_DISTANCE_MM: f32 = 0.2;
+const MIN_POLYLINE_ARC_SAGITTA_MM: f32 = 0.2;
+const POLYLINE_FIT_TANGENT_MIN_DOT: f32 = 0.95;
+const POLYLINE_FIT_SWEEP_TOLERANCE_RAD: f32 = 0.05;
+const MIN_POLYLINE_ARC_POINTS: usize = 4;
+const MIN_POLYLINE_ARC_POINT_ADVANTAGE: usize = 2;
+const MAX_POLYLINE_FIT_LOOKAHEAD_POINTS: usize = 128;
 
 #[derive(Debug, Clone, Copy)]
 enum DrawPrimitive {
@@ -535,7 +543,300 @@ fn build_draw_primitives(stroke: &Stroke, settings: &ToolSettings) -> Vec<DrawPr
         })
         .collect::<Vec<_>>();
 
-    apply_corner_smoothing(base_primitives, settings)
+    let smoothed = apply_corner_smoothing(base_primitives, settings);
+    optimize_primitives_for_curve_output(smoothed, settings.curve_output_mode)
+}
+
+fn optimize_primitives_for_curve_output(
+    primitives: Vec<DrawPrimitive>,
+    curve_output_mode: CurveOutputMode,
+) -> Vec<DrawPrimitive> {
+    if !curve_output_mode.prefers_g2g3() || curve_output_mode.prefers_g5() {
+        return primitives;
+    }
+
+    let mut optimized = Vec::new();
+    let mut pending_path_run = Vec::new();
+    for primitive in primitives {
+        match primitive {
+            DrawPrimitive::Path(segment) => pending_path_run.push(segment),
+            DrawPrimitive::Arc(segment) => {
+                flush_optimized_path_run(&mut pending_path_run, &mut optimized);
+                optimized.push(DrawPrimitive::Arc(segment));
+            }
+        }
+    }
+    flush_optimized_path_run(&mut pending_path_run, &mut optimized);
+
+    optimized
+}
+
+fn flush_optimized_path_run(path_run: &mut Vec<Segment>, optimized: &mut Vec<DrawPrimitive>) {
+    if path_run.is_empty() {
+        return;
+    }
+
+    optimized.extend(optimize_path_run_for_arc_output(std::mem::take(path_run)));
+}
+
+fn optimize_path_run_for_arc_output(path_run: Vec<Segment>) -> Vec<DrawPrimitive> {
+    let mut polyline = Vec::new();
+    for segment in path_run {
+        append_polyline_points(&mut polyline, &segment.flatten_points());
+    }
+
+    let polyline = dedupe_consecutive_polyline_points(polyline);
+    if polyline.len() < 2 {
+        return Vec::new();
+    }
+
+    fit_polyline_to_primitives(&polyline)
+        .into_iter()
+        .filter(|primitive| primitive.approximate_length() > CORNER_EPSILON)
+        .collect()
+}
+
+fn append_polyline_points(polyline: &mut Vec<Vec2>, points: &[Vec2]) {
+    for (index, point) in points.iter().copied().enumerate() {
+        if index == 0 && polyline.last().is_some_and(|last| points_match(*last, point)) {
+            continue;
+        }
+        polyline.push(point);
+    }
+}
+
+fn dedupe_consecutive_polyline_points(points: Vec<Vec2>) -> Vec<Vec2> {
+    let mut deduped = Vec::with_capacity(points.len());
+    for point in points {
+        if deduped.last().is_some_and(|last| points_match(*last, point)) {
+            continue;
+        }
+        deduped.push(point);
+    }
+    deduped
+}
+
+fn fit_polyline_to_primitives(points: &[Vec2]) -> Vec<DrawPrimitive> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut primitives = Vec::new();
+    let mut start = 0usize;
+    while start + 1 < points.len() {
+        let line_end = find_longest_line_fit(points, start);
+        let arc_fit = find_longest_arc_fit(points, start);
+
+        if let Some((arc_end, arc)) = arc_fit {
+            if arc_end >= line_end.saturating_add(MIN_POLYLINE_ARC_POINT_ADVANTAGE) {
+                primitives.push(DrawPrimitive::Arc(arc));
+                start = arc_end;
+                continue;
+            }
+        }
+
+        let end = line_end.max(start + 1);
+        primitives.push(DrawPrimitive::Path(Segment::line(points[start], points[end])));
+        start = end;
+    }
+
+    primitives
+}
+
+fn find_longest_line_fit(points: &[Vec2], start: usize) -> usize {
+    let max_end = (start + MAX_POLYLINE_FIT_LOOKAHEAD_POINTS).min(points.len().saturating_sub(1));
+    for end in (start + 1..=max_end).rev() {
+        if polyline_range_fits_line(points, start, end) {
+            return end;
+        }
+    }
+    start + 1
+}
+
+fn polyline_range_fits_line(points: &[Vec2], start: usize, end: usize) -> bool {
+    if end <= start + 1 {
+        return true;
+    }
+
+    let segment = points[end] - points[start];
+    let segment_length_sq = segment.length_squared();
+    if segment_length_sq <= 1e-6 {
+        return false;
+    }
+
+    let mut previous_t = 0.0;
+    for point in points.iter().copied().take(end).skip(start + 1) {
+        let t = ((point - points[start]).dot(segment) / segment_length_sq).clamp(0.0, 1.0);
+        if t + 1e-4 < previous_t {
+            return false;
+        }
+        previous_t = t;
+
+        if polyline_point_to_segment_distance_sq(point, points[start], points[end])
+            > POLYLINE_FIT_TOLERANCE_MM.powi(2)
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn find_longest_arc_fit(points: &[Vec2], start: usize) -> Option<(usize, ArcSegment)> {
+    let max_end = (start + MAX_POLYLINE_FIT_LOOKAHEAD_POINTS).min(points.len().saturating_sub(1));
+    if max_end < start + MIN_POLYLINE_ARC_POINTS - 1 {
+        return None;
+    }
+
+    for end in ((start + MIN_POLYLINE_ARC_POINTS - 1)..=max_end).rev() {
+        if let Some(arc) = fit_polyline_range_as_arc(points, start, end) {
+            return Some((end, arc));
+        }
+    }
+
+    None
+}
+
+fn fit_polyline_range_as_arc(points: &[Vec2], start: usize, end: usize) -> Option<ArcSegment> {
+    let mid_index = arc_seed_index(points, start, end)?;
+    let arc = circle_arc_from_points(points[start], points[mid_index], points[end])?;
+    if arc_sagitta_mm(arc) < MIN_POLYLINE_ARC_SAGITTA_MM {
+        return None;
+    }
+    if polyline_range_matches_arc(points, start, end, arc) { Some(arc) } else { None }
+}
+
+fn arc_seed_index(points: &[Vec2], start: usize, end: usize) -> Option<usize> {
+    let mut best_index = None;
+    let mut best_distance_sq = 0.0;
+    for index in start + 1..end {
+        let distance_sq =
+            polyline_point_to_segment_distance_sq(points[index], points[start], points[end]);
+        if distance_sq > best_distance_sq {
+            best_distance_sq = distance_sq;
+            best_index = Some(index);
+        }
+    }
+
+    if best_distance_sq > MIN_POLYLINE_ARC_SEED_DISTANCE_MM.powi(2) { best_index } else { None }
+}
+
+fn arc_sagitta_mm(arc: ArcSegment) -> f32 {
+    polyline_point_to_segment_distance_sq(
+        arc.point_and_tangent_at_fraction(0.5).0,
+        arc.start,
+        arc.end,
+    )
+    .sqrt()
+}
+
+fn circle_arc_from_points(start: Vec2, through: Vec2, end: Vec2) -> Option<ArcSegment> {
+    let start_through = through - start;
+    let through_end = end - through;
+    if start_through.length_squared() <= 1e-6 || through_end.length_squared() <= 1e-6 {
+        return None;
+    }
+
+    let center = line_intersection(
+        (start + through) * 0.5,
+        left_normal(start_through),
+        (through + end) * 0.5,
+        left_normal(through_end),
+    )?;
+    let start_vector = start - center;
+    let through_vector = through - center;
+    let end_vector = end - center;
+    let ccw_to_through = directed_positive_sweep(start_vector, through_vector, false);
+    let ccw_to_end = directed_positive_sweep(start_vector, end_vector, false);
+    let clockwise = ccw_to_through > ccw_to_end;
+
+    Some(ArcSegment { start, end, center, clockwise })
+}
+
+fn polyline_range_matches_arc(points: &[Vec2], start: usize, end: usize, arc: ArcSegment) -> bool {
+    let radius = arc.radius();
+    if !radius.is_finite() || radius <= CORNER_EPSILON {
+        return false;
+    }
+
+    let total_sweep =
+        directed_positive_sweep(arc.start - arc.center, arc.end - arc.center, arc.clockwise);
+    if total_sweep <= MIN_DETECTABLE_ARC_SWEEP_RAD {
+        return false;
+    }
+
+    let start_direction = (points[start + 1] - points[start]).normalize_or_zero();
+    let end_direction = (points[end] - points[end - 1]).normalize_or_zero();
+    if start_direction.dot(expected_arc_tangent(arc.clockwise, arc.start, arc.center))
+        < POLYLINE_FIT_TANGENT_MIN_DOT
+        || end_direction.dot(expected_arc_tangent(arc.clockwise, arc.end, arc.center))
+            < POLYLINE_FIT_TANGENT_MIN_DOT
+    {
+        return false;
+    }
+
+    let tolerance_sq = POLYLINE_FIT_TOLERANCE_MM.powi(2);
+    let mut previous_progress = 0.0;
+    for point_index in start + 1..=end {
+        let segment_start = points[point_index - 1];
+        let point = points[point_index];
+        if point_to_arc_distance_sq((segment_start + point) * 0.5, arc) > tolerance_sq {
+            return false;
+        }
+
+        let radial = point - arc.center;
+        let radial_length = radial.length();
+        if !radial_length.is_finite() || radial_length <= CORNER_EPSILON {
+            return false;
+        }
+        if point_to_arc_distance_sq(point, arc) > tolerance_sq {
+            return false;
+        }
+
+        let progress = directed_positive_sweep(arc.start - arc.center, radial, arc.clockwise);
+        if progress + POLYLINE_FIT_SWEEP_TOLERANCE_RAD < previous_progress
+            || progress > total_sweep + POLYLINE_FIT_SWEEP_TOLERANCE_RAD
+        {
+            return false;
+        }
+        previous_progress = progress;
+    }
+
+    true
+}
+
+fn point_to_arc_distance_sq(point: Vec2, arc: ArcSegment) -> f32 {
+    let radial = point - arc.center;
+    let radial_length = radial.length();
+    if !radial_length.is_finite() || radial_length <= CORNER_EPSILON {
+        return point.distance_squared(arc.start).min(point.distance_squared(arc.end));
+    }
+
+    let progress = directed_positive_sweep(arc.start - arc.center, radial, arc.clockwise);
+    let total_sweep =
+        directed_positive_sweep(arc.start - arc.center, arc.end - arc.center, arc.clockwise);
+    if progress <= total_sweep + POLYLINE_FIT_SWEEP_TOLERANCE_RAD {
+        let closest_point = arc.center + radial / radial_length * arc.radius();
+        point.distance_squared(closest_point)
+    } else {
+        point.distance_squared(arc.start).min(point.distance_squared(arc.end))
+    }
+}
+
+fn directed_positive_sweep(start_vector: Vec2, end_vector: Vec2, clockwise: bool) -> f32 {
+    let sweep = signed_sweep_between(start_vector, end_vector, clockwise);
+    if clockwise { -sweep } else { sweep }
+}
+fn polyline_point_to_segment_distance_sq(point: Vec2, start: Vec2, end: Vec2) -> f32 {
+    let segment = end - start;
+    let length_sq = segment.length_squared();
+    if length_sq <= 1e-6 {
+        return point.distance_squared(start);
+    }
+
+    let t = ((point - start).dot(segment) / length_sq).clamp(0.0, 1.0);
+    let projected = start + segment * t;
+    point.distance_squared(projected)
 }
 
 fn apply_corner_smoothing(
@@ -1100,8 +1401,12 @@ mod tests {
     use glam::vec2;
 
     use super::*;
-    use crate::paths::{FillRegion, FillRule};
+    use crate::paths::{FillRegion, FillRule, parse_svg_with_language, prepare_svg};
     use crate::plot::model::{CurveOutputMode, PrintStartMode, PrintableArea, ToolSettings};
+
+    const ARC_COMPARISON_SAMPLE_STEP_MM: f32 = 0.2;
+    const MAX_SAMPLE_ARC_DEVIATION_MM: f32 = 0.15;
+    const MEAN_SAMPLE_ARC_DEVIATION_MM: f32 = 0.05;
 
     fn line_prepared_svg() -> PreparedSvg {
         PreparedSvg {
@@ -1128,6 +1433,216 @@ mod tests {
             drawing_bounds: vec2(10.0, 10.0),
             is_out_of_bounds: false,
         }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct DirectedDeviationMetrics {
+        max_distance_mm: f32,
+        total_distance_mm: f32,
+        sample_count: usize,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct SymmetricDeviationMetrics {
+        max_distance_mm: f32,
+        mean_distance_mm: f32,
+        sample_count: usize,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct SampleArcOptimizationMetrics {
+        max_deviation_mm: f32,
+        mean_deviation_mm: f32,
+        linear_g1: usize,
+        optimized_g1: usize,
+        optimized_g2: usize,
+        optimized_g3: usize,
+    }
+
+    fn sample_svg_bytes(source_name: &str) -> &'static [u8] {
+        match source_name {
+            "sample1.svg" => {
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/sample/sample1.svg"))
+                    as &[u8]
+            }
+            "sample2.svg" => {
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/sample/sample2.svg"))
+                    as &[u8]
+            }
+            "sample3.svg" => {
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/sample/sample3.svg"))
+                    as &[u8]
+            }
+            "sample5.svg" => {
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/sample/sample5.svg"))
+                    as &[u8]
+            }
+            _ => panic!("unsupported repository sample: {source_name}"),
+        }
+    }
+
+    fn sample_tool_settings(curve_output_mode: CurveOutputMode) -> ToolSettings {
+        ToolSettings {
+            printable_area: PrintableArea::new(800.0, 600.0),
+            print_speed_mm_s: 25.0,
+            lift_height_mm: 2.0,
+            print_start_mode: PrintStartMode::DirectFromCurrentPosition,
+            curve_output_mode,
+            ..ToolSettings::default()
+        }
+    }
+
+    fn sample_prepared_svg(source_name: &str) -> PreparedSvg {
+        let printable_area = PrintableArea::new(800.0, 600.0);
+        let parsed = parse_svg_with_language(
+            source_name.to_owned(),
+            sample_svg_bytes(source_name),
+            Language::English,
+        )
+        .unwrap_or_else(|error| panic!("{source_name} should parse: {error}"));
+        let placement = parsed.centered_native_placement(printable_area);
+        prepare_svg(&parsed, placement, printable_area)
+    }
+
+    fn sample_plan(source_name: &str, curve_output_mode: CurveOutputMode) -> ToolpathPlan {
+        build_plan(sample_prepared_svg(source_name), &sample_tool_settings(curve_output_mode))
+    }
+
+    fn sample1_plan(curve_output_mode: CurveOutputMode) -> ToolpathPlan {
+        sample_plan("sample1.svg", curve_output_mode)
+    }
+
+    fn sample_arc_optimization_metrics(source_name: &str) -> SampleArcOptimizationMetrics {
+        let prepared = sample_prepared_svg(source_name);
+        let linear_settings = sample_tool_settings(CurveOutputMode::LinearSegments);
+        let optimized_settings = sample_tool_settings(CurveOutputMode::PreferG2G3);
+
+        let mut max_deviation_mm: f32 = 0.0;
+        let mut total_distance_mm = 0.0;
+        let mut total_samples = 0usize;
+
+        for stroke in &prepared.strokes {
+            let linear_primitives = build_draw_primitives(stroke, &linear_settings);
+            let optimized_primitives = build_draw_primitives(stroke, &optimized_settings);
+            let deviation =
+                symmetric_deviation_between_primitives(&linear_primitives, &optimized_primitives);
+            max_deviation_mm = max_deviation_mm.max(deviation.max_distance_mm);
+            total_distance_mm += deviation.mean_distance_mm * deviation.sample_count as f32;
+            total_samples += deviation.sample_count;
+        }
+
+        let linear_plan = build_plan(prepared.clone(), &linear_settings);
+        let optimized_plan = build_plan(prepared, &optimized_settings);
+        let (linear_g1, _, _) = count_motion_commands(&linear_plan);
+        let (optimized_g1, optimized_g2, optimized_g3) = count_motion_commands(&optimized_plan);
+
+        SampleArcOptimizationMetrics {
+            max_deviation_mm,
+            mean_deviation_mm: if total_samples == 0 {
+                0.0
+            } else {
+                total_distance_mm / total_samples as f32
+            },
+            linear_g1,
+            optimized_g1,
+            optimized_g2,
+            optimized_g3,
+        }
+    }
+
+    fn symmetric_deviation_between_primitives(
+        baseline: &[DrawPrimitive],
+        optimized: &[DrawPrimitive],
+    ) -> SymmetricDeviationMetrics {
+        let baseline_polyline = comparison_polyline(baseline);
+        let optimized_polyline = comparison_polyline(optimized);
+        let forward = directed_polyline_deviation(&baseline_polyline, &optimized_polyline);
+        let backward = directed_polyline_deviation(&optimized_polyline, &baseline_polyline);
+        let sample_count = forward.sample_count + backward.sample_count;
+        let total_distance_mm = forward.total_distance_mm + backward.total_distance_mm;
+
+        SymmetricDeviationMetrics {
+            max_distance_mm: forward.max_distance_mm.max(backward.max_distance_mm),
+            mean_distance_mm: if sample_count == 0 {
+                0.0
+            } else {
+                total_distance_mm / sample_count as f32
+            },
+            sample_count,
+        }
+    }
+
+    fn comparison_polyline(primitives: &[DrawPrimitive]) -> Vec<Vec2> {
+        let mut polyline = Vec::new();
+        for primitive in primitives.iter().copied() {
+            let points = match primitive {
+                DrawPrimitive::Path(segment) => segment.flatten_points(),
+                DrawPrimitive::Arc(arc) => sample_arc_points(arc, ARC_COMPARISON_SAMPLE_STEP_MM),
+            };
+            append_polyline_points(&mut polyline, &points);
+        }
+        polyline
+    }
+
+    fn sample_arc_points(arc: ArcSegment, step_mm: f32) -> Vec<Vec2> {
+        let steps = (arc.approximate_length() / step_mm.max(CORNER_EPSILON)).ceil() as usize;
+        let steps = steps.max(1);
+        let mut points = Vec::with_capacity(steps + 1);
+        points.push(arc.start);
+        for step in 1..=steps {
+            let fraction = step as f32 / steps as f32;
+            points.push(arc.point_and_tangent_at_fraction(fraction).0);
+        }
+        if let Some(last) = points.last_mut() {
+            *last = arc.end;
+        }
+        points
+    }
+
+    fn directed_polyline_deviation(
+        sample_points: &[Vec2],
+        target_polyline: &[Vec2],
+    ) -> DirectedDeviationMetrics {
+        if sample_points.is_empty() {
+            return DirectedDeviationMetrics {
+                max_distance_mm: 0.0,
+                total_distance_mm: 0.0,
+                sample_count: 0,
+            };
+        }
+
+        let mut max_distance_mm: f32 = 0.0;
+        let mut total_distance_mm = 0.0;
+        for point in sample_points.iter().copied() {
+            let distance_mm = point_to_polyline_distance_mm(point, target_polyline);
+            max_distance_mm = max_distance_mm.max(distance_mm);
+            total_distance_mm += distance_mm;
+        }
+
+        DirectedDeviationMetrics {
+            max_distance_mm,
+            total_distance_mm,
+            sample_count: sample_points.len(),
+        }
+    }
+
+    fn point_to_polyline_distance_mm(point: Vec2, polyline: &[Vec2]) -> f32 {
+        match polyline {
+            [] => 0.0,
+            [only] => point.distance(*only),
+            _ => polyline
+                .windows(2)
+                .map(|segment| polyline_point_to_segment_distance_sq(point, segment[0], segment[1]))
+                .fold(f32::INFINITY, f32::min)
+                .sqrt(),
+        }
+    }
+
+    fn count_motion_commands(plan: &ToolpathPlan) -> (usize, usize, usize) {
+        let g1 = plan.gcode_lines.iter().filter(|line| line.starts_with("G1 X")).count();
+        let g2 = plan.gcode_lines.iter().filter(|line| line.starts_with("G2 ")).count();
+        let g3 = plan.gcode_lines.iter().filter(|line| line.starts_with("G3 ")).count();
+        (g1, g2, g3)
     }
 
     #[test]
@@ -1222,6 +1737,116 @@ mod tests {
     }
 
     #[test]
+    fn emits_g2g3_for_bezier_curve_segments_when_g5_is_disabled() {
+        let control_scale = 10.0 * 0.552_284_8;
+        let prepared = PreparedSvg {
+            source_name: "arc-like-curve.svg".to_owned(),
+            strokes: vec![Stroke::new(vec![Segment::cubic(
+                vec2(10.0, 0.0),
+                vec2(10.0, control_scale),
+                vec2(control_scale, 10.0),
+                vec2(0.0, 10.0),
+            )])],
+            fill_regions: Vec::new(),
+            warnings: Vec::new(),
+            drawing_origin: vec2(0.0, 0.0),
+            drawing_bounds: vec2(10.0, 10.0),
+            is_out_of_bounds: false,
+        };
+
+        let plan = build_plan(
+            prepared,
+            &ToolSettings {
+                printable_area: PrintableArea::new(100.0, 100.0),
+                print_speed_mm_s: 25.0,
+                lift_height_mm: 2.0,
+                print_start_mode: PrintStartMode::DirectFromCurrentPosition,
+                curve_output_mode: CurveOutputMode::PreferG2G3,
+                ..ToolSettings::default()
+            },
+        );
+
+        assert!(plan.gcode_lines.iter().any(|line| line.starts_with("G3 ")));
+        assert!(!plan.gcode_lines.iter().any(|line| line.starts_with("G5 ")));
+        assert!(plan.warnings.iter().any(|warning| warning.contains("G2/G3")));
+    }
+
+    #[test]
+    fn keeps_g5_priority_when_g2g3_and_g5_are_both_enabled() {
+        let control_scale = 10.0 * 0.552_284_8;
+        let prepared = PreparedSvg {
+            source_name: "arc-like-curve.svg".to_owned(),
+            strokes: vec![Stroke::new(vec![Segment::cubic(
+                vec2(10.0, 0.0),
+                vec2(10.0, control_scale),
+                vec2(control_scale, 10.0),
+                vec2(0.0, 10.0),
+            )])],
+            fill_regions: Vec::new(),
+            warnings: Vec::new(),
+            drawing_origin: vec2(0.0, 0.0),
+            drawing_bounds: vec2(10.0, 10.0),
+            is_out_of_bounds: false,
+        };
+
+        let plan = build_plan(
+            prepared,
+            &ToolSettings {
+                printable_area: PrintableArea::new(100.0, 100.0),
+                print_speed_mm_s: 25.0,
+                lift_height_mm: 2.0,
+                print_start_mode: PrintStartMode::DirectFromCurrentPosition,
+                curve_output_mode: CurveOutputMode::PreferG2G3AndG5,
+                ..ToolSettings::default()
+            },
+        );
+
+        assert!(plan.gcode_lines.iter().any(|line| line.starts_with("G5 ")));
+        assert!(
+            !plan.gcode_lines.iter().any(|line| line.starts_with("G2 ") || line.starts_with("G3 "))
+        );
+    }
+
+    #[test]
+    fn sample1_reports_arc_command_counts_in_g2g3_mode() {
+        let linear = sample1_plan(CurveOutputMode::LinearSegments);
+        let arc = sample1_plan(CurveOutputMode::PreferG2G3);
+        let (linear_g1, linear_g2, linear_g3) = count_motion_commands(&linear);
+        let (arc_g1, arc_g2, arc_g3) = count_motion_commands(&arc);
+
+        assert_eq!(linear_g2 + linear_g3, 0);
+        assert!(arc_g2 + arc_g3 >= 20);
+        assert!(arc_g1 + arc_g2 + arc_g3 < linear_g1 / 4);
+    }
+
+    #[test]
+    fn sample_svg_arc_optimization_reports_geometric_error() {
+        for sample in ["sample1.svg", "sample2.svg", "sample3.svg", "sample5.svg"] {
+            let metrics = sample_arc_optimization_metrics(sample);
+            let optimized_total =
+                metrics.optimized_g1 + metrics.optimized_g2 + metrics.optimized_g3;
+            assert!(
+                optimized_total < metrics.linear_g1,
+                "{sample} should still reduce command count (linear G1 {}, optimized total {})",
+                metrics.linear_g1,
+                optimized_total,
+            );
+            assert!(
+                metrics.max_deviation_mm <= MAX_SAMPLE_ARC_DEVIATION_MM,
+                "{sample} max deviation {:.3}mm exceeded {:.3}mm",
+                metrics.max_deviation_mm,
+                MAX_SAMPLE_ARC_DEVIATION_MM,
+            );
+            assert!(
+                metrics.mean_deviation_mm <= MEAN_SAMPLE_ARC_DEVIATION_MM,
+                "{sample} mean deviation {:.3}mm exceeded {:.3}mm",
+                metrics.mean_deviation_mm,
+                MEAN_SAMPLE_ARC_DEVIATION_MM,
+            );
+        }
+    }
+
+    #[test]
     fn emits_g3_for_smoothed_right_angle_when_arc_mode_enabled() {
         let plan = build_plan(
             right_angle_prepared_svg(),
@@ -1258,26 +1883,12 @@ mod tests {
             is_out_of_bounds: false,
         };
 
-        let unsmoothed = build_plan(
-            prepared.clone(),
-            &ToolSettings {
-                printable_area: PrintableArea::new(100.0, 100.0),
-                print_speed_mm_s: 25.0,
-                lift_height_mm: 2.0,
-                print_start_mode: PrintStartMode::DirectFromCurrentPosition,
-                curve_output_mode: CurveOutputMode::PreferG2G3,
-                corner_smoothing_enabled: false,
-                corner_smoothing_radius_mm: 1.0,
-                corner_smoothing_angle_deg: 45.0,
-                ..ToolSettings::default()
-            },
-        );
         let smoothing_settings = ToolSettings {
             printable_area: PrintableArea::new(100.0, 100.0),
             print_speed_mm_s: 25.0,
             lift_height_mm: 2.0,
             print_start_mode: PrintStartMode::DirectFromCurrentPosition,
-            curve_output_mode: CurveOutputMode::PreferG2G3,
+            curve_output_mode: CurveOutputMode::LinearSegments,
             corner_smoothing_enabled: true,
             corner_smoothing_radius_mm: 1.0,
             corner_smoothing_angle_deg: 45.0,
@@ -1285,12 +1896,6 @@ mod tests {
         };
         let smoothed_primitives = build_draw_primitives(&prepared.strokes[0], &smoothing_settings);
 
-        assert!(
-            !unsmoothed
-                .gcode_lines
-                .iter()
-                .any(|line| line.starts_with("G2 ") || line.starts_with("G3 "))
-        );
         assert_eq!(smoothed_primitives.len(), 3);
         assert!(!points_match(smoothed_primitives[0].end_point(), vec2(10.0, 10.0)));
         assert!(!points_match(smoothed_primitives[1].start_point(), vec2(10.0, 10.0)));

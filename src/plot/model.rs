@@ -52,7 +52,7 @@ impl SvgPlacement {
 }
 
 fn default_corner_smoothing_enabled() -> bool {
-    true
+    false
 }
 
 fn default_corner_smoothing_radius_mm() -> f32 {
@@ -160,8 +160,8 @@ pub enum PrintStartMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CurveOutputMode {
-    #[default]
     LinearSegments,
+    #[default]
     PreferG2G3,
     PreferG5,
     PreferG2G3AndG5,
@@ -348,5 +348,6 @@ mod tests {
         let settings = ToolSettings::default();
         assert_eq!(settings.lift_height_mm, 1.0);
         assert_eq!(settings.print_start_mode, PrintStartMode::DirectFromCurrentPosition);
+        assert!(!settings.corner_smoothing_enabled);
     }
 }

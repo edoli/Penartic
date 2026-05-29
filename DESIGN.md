@@ -41,7 +41,7 @@ The product must remain useful even when no device is connected:
 - travel moves lift the pen by the configured Z lift amount
 - jobs in home-start mode lift Z with a relative move, home XY, move to the first drawing point while lifted, lower Z with a relative move, and then draw
 - jobs in direct-start mode skip XY homing but still lift Z by the configured amount, move to the first drawing point while lifted, lower Z with a relative move, and then draw
-- drawing moves within a stroke are emitted as continuous `G1` XY moves by default, can emit generated rounded-corner arcs as `G2`/`G3`, and can emit preserved Bézier segments or fallback rounded fillets as higher-level `G5` spline moves when the matching advanced modes are enabled
+- drawing moves within a stroke are emitted as continuous `G1` XY moves by default; optional sharp-corner rounding is disabled by default, can emit generated rounded-corner arcs as `G2`/`G3` when enabled, and when G2/G3 output is enabled without G5 the app deduplicates the prepared stroke polyline and greedily compresses it into circular arcs and straight runs, but only accepts candidate arcs that satisfy seed/sagitta gates and stay close to the original polyline vertices plus segment midpoints before falling back to segmented `G1` output
 - filled SVG paths are converted into internal hatch strokes before G-code generation when fill support is enabled
 
 ## 3. Runtime architecture
@@ -100,9 +100,9 @@ updated with the same value to avoid WGPU validation errors.
 
 ## 5. Fonts and localization
 
-- the UI supports English and Korean, defaults to English, persists the selected language plus the last-used device connection preferences through eframe storage on native and web builds, and sources localized strings from `src/res/lang/english.rs` and `src/res/lang/korean.rs`
+- the UI supports English and Korean, defaults to English, persists the selected language, the last-used device connection preferences, and the current G2/G3 or G5 curve-output selection through eframe storage on native and web builds, and sources localized strings from `src/res/lang/english.rs` and `src/res/lang/korean.rs`
 - language persistence relies on `eframe`'s `persistence` feature, which maps to native app storage on desktop builds and browser local storage on web builds
-- persisted device preferences include the selected connection method, serial port, ESP3D endpoint, and OctoPrint base URL/API key so the last-used device configuration is restored on restart
+- persisted device preferences include the selected connection method, serial port, ESP3D endpoint, and OctoPrint base URL/API key so the last-used device configuration is restored on restart, and the persisted tool settings currently keep the selected curve-output mode so G2/G3 and G5 toggles survive restart as well
 - Korean mode still needs CJK-capable fallback fonts for the UI and warning text
 - native builds asynchronously scan platform font locations and an optional `fallback_font.ttf`
   next to the executable
@@ -155,7 +155,7 @@ updated with the same value to avoid WGPU validation errors.
 - web serial streaming follows the same comment stripping, ACK tracking, stop, jog/home, and bounded
   one-line in-flight behavior as the native worker; it requires a browser with Web Serial support, a secure
   context, and the user's explicit port selection
-- G2/G3 arc output is optional because firmware support varies and is used for rounded-corner transitions when those joins can be represented as true arcs
+- G2/G3 arc output is optional because firmware support varies and is used both for rounded-corner transitions and for whole-stroke polyline arc compression when G5 is not selected, reducing overly segmented motion on printers that cannot execute `G5` while keeping whole-stroke fitting bounded by geometric-error checks against the original polyline
 - G5 curve output is optional because firmware support varies; the default remains linear G-code for compatibility
 
 ## 7. SVG conversion pipeline

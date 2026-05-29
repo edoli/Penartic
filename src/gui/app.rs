@@ -48,11 +48,16 @@ const APP_STATE_STORAGE_KEY: &str = eframe::APP_KEY;
 struct PersistedAppState {
     language: Language,
     device: DevicePreferences,
+    curve_output_mode: CurveOutputMode,
 }
 
 impl Default for PersistedAppState {
     fn default() -> Self {
-        Self { language: Language::default(), device: DevicePreferences::default() }
+        Self {
+            language: Language::default(),
+            device: DevicePreferences::default(),
+            curve_output_mode: CurveOutputMode::default(),
+        }
     }
 }
 
@@ -184,7 +189,10 @@ impl PenarticApp {
 
         let mut app = Self {
             language,
-            settings: ToolSettings::default(),
+            settings: ToolSettings {
+                curve_output_mode: persisted.curve_output_mode,
+                ..ToolSettings::default()
+            },
             device,
             preview_renderer: PreviewRenderer::new(cc, preview_msaa_samples),
             viewport_state: ViewportState::default(),
@@ -1581,7 +1589,11 @@ impl eframe::App for PenarticApp {
         eframe::set_value(
             storage,
             APP_STATE_STORAGE_KEY,
-            &PersistedAppState { language: self.language, device: self.device.preferences() },
+            &PersistedAppState {
+                language: self.language,
+                device: self.device.preferences(),
+                curve_output_mode: self.settings.curve_output_mode,
+            },
         );
     }
 }
@@ -1993,4 +2005,60 @@ fn format_jog_step(step: f32) -> &'static str {
 fn printable_area_changed(current: PrintableArea, next: PrintableArea) -> bool {
     (current.width_mm - next.width_mm).abs() > 0.01
         || (current.height_mm - next.height_mm).abs() > 0.01
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct TestStorage {
+        values: HashMap<String, String>,
+    }
+
+    impl eframe::Storage for TestStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.values.get(key).cloned()
+        }
+
+        fn set_string(&mut self, key: &str, value: String) {
+            self.values.insert(key.to_owned(), value);
+        }
+
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn persisted_app_state_round_trips_curve_output_mode() {
+        let mut storage = TestStorage::default();
+        let state = PersistedAppState {
+            language: Language::Korean,
+            device: DevicePreferences::default(),
+            curve_output_mode: CurveOutputMode::PreferG2G3AndG5,
+        };
+
+        eframe::set_value(&mut storage, APP_STATE_STORAGE_KEY, &state);
+        let loaded = load_persisted_app_state(&storage).expect("state should round-trip");
+
+        assert_eq!(loaded.language, Language::Korean);
+        assert_eq!(loaded.curve_output_mode, CurveOutputMode::PreferG2G3AndG5);
+    }
+
+    #[test]
+    fn legacy_language_only_storage_keeps_default_curve_output_mode() {
+        let mut storage = TestStorage::default();
+        eframe::Storage::set_string(
+            &mut storage,
+            APP_STATE_STORAGE_KEY,
+            Language::Korean.storage_key().to_owned(),
+        );
+
+        let loaded =
+            load_persisted_app_state(&storage).expect("legacy language storage should load");
+
+        assert_eq!(loaded.language, Language::Korean);
+        assert_eq!(loaded.curve_output_mode, CurveOutputMode::LinearSegments);
+    }
 }
