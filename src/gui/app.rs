@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use super::layout::{Size, UiLayoutExt};
 use super::viewer::{
-    ManipulationMode, PreviewManipulation, PreviewObjectBounds, PreviewRenderer, ViewportState,
-    project_bed_point,
+    ManipulationMode, PreviewManipulation, PreviewObjectBounds, PreviewRenderer, PreviewViewMode,
+    ViewportState, project_bed_point,
 };
 use crate::{
     paths,
@@ -49,6 +49,7 @@ struct PersistedAppState {
     language: Language,
     device: DevicePreferences,
     curve_output_mode: CurveOutputMode,
+    preview_view_mode: PreviewViewMode,
 }
 
 impl Default for PersistedAppState {
@@ -57,6 +58,7 @@ impl Default for PersistedAppState {
             language: Language::default(),
             device: DevicePreferences::default(),
             curve_output_mode: CurveOutputMode::default(),
+            preview_view_mode: PreviewViewMode::default(),
         }
     }
 }
@@ -195,7 +197,7 @@ impl PenarticApp {
             },
             device,
             preview_renderer: PreviewRenderer::new(cc, preview_msaa_samples),
-            viewport_state: ViewportState::default(),
+            viewport_state: ViewportState::with_view_mode(persisted.preview_view_mode),
             svg_objects: Vec::new(),
             selected_svg_id: None,
             next_svg_id: 1,
@@ -1530,6 +1532,22 @@ impl PenarticApp {
                         self.preview_playing = false;
                     }
 
+                    ui.label(text.preview_view_mode);
+                    let mut preview_view_mode = self.viewport_state.view_mode();
+                    egui::ComboBox::from_id_salt("preview-view-mode")
+                        .width(72.0)
+                        .selected_text(preview_view_mode.label(self.language))
+                        .show_ui(ui, |ui| {
+                            for view_mode in PreviewViewMode::ALL {
+                                ui.selectable_value(
+                                    &mut preview_view_mode,
+                                    view_mode,
+                                    view_mode.label(self.language),
+                                );
+                            }
+                        });
+                    self.viewport_state.set_view_mode(preview_view_mode);
+
                     ui.checkbox(&mut self.show_travel_moves, text.show_pen_lift_travel_paths);
                     ui.checkbox(&mut self.show_drawing_bounds, text.show_bounding_box);
 
@@ -1598,6 +1616,7 @@ impl eframe::App for PenarticApp {
                 language: self.language,
                 device: self.device.preferences(),
                 curve_output_mode: self.settings.curve_output_mode,
+                preview_view_mode: self.viewport_state.view_mode(),
             },
         );
     }
@@ -2043,6 +2062,7 @@ mod tests {
             language: Language::Korean,
             device: DevicePreferences::default(),
             curve_output_mode: CurveOutputMode::PreferG2G3AndG5,
+            preview_view_mode: PreviewViewMode::TwoD,
         };
 
         eframe::set_value(&mut storage, APP_STATE_STORAGE_KEY, &state);
@@ -2050,6 +2070,7 @@ mod tests {
 
         assert_eq!(loaded.language, Language::Korean);
         assert_eq!(loaded.curve_output_mode, CurveOutputMode::PreferG2G3AndG5);
+        assert_eq!(loaded.preview_view_mode, PreviewViewMode::TwoD);
     }
 
     #[test]
@@ -2066,5 +2087,6 @@ mod tests {
 
         assert_eq!(loaded.language, Language::Korean);
         assert_eq!(loaded.curve_output_mode, CurveOutputMode::default());
+        assert_eq!(loaded.preview_view_mode, PreviewViewMode::default());
     }
 }

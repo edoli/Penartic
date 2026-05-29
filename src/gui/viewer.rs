@@ -9,6 +9,7 @@ use eframe::{
     },
 };
 use glam::{Mat4, Vec2, Vec3, vec3};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     plot::model::{MotionKind, MotionSegment, PrintableArea, ToolpathPlan},
@@ -18,21 +19,47 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct ViewportState {
+    view_mode: PreviewViewMode,
     yaw: f32,
     pitch: f32,
-    zoom: f32,
-    pan: Vec2,
+    zoom_3d: f32,
+    pan_3d: Vec2,
+    zoom_2d: f32,
+    pan_2d: Vec2,
     active_object_id: Option<u64>,
 }
 
 impl Default for ViewportState {
     fn default() -> Self {
         Self {
+            view_mode: PreviewViewMode::default(),
             yaw: -std::f32::consts::FRAC_PI_2,
             pitch: 0.75,
-            zoom: 1.15,
-            pan: Vec2::ZERO,
+            zoom_3d: 1.15,
+            pan_3d: Vec2::ZERO,
+            zoom_2d: 1.0,
+            pan_2d: Vec2::ZERO,
             active_object_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewViewMode {
+    TwoD,
+    #[default]
+    ThreeD,
+}
+
+impl PreviewViewMode {
+    pub const ALL: [Self; 2] = [Self::TwoD, Self::ThreeD];
+
+    pub fn label(self, language: Language) -> &'static str {
+        let text = language.strings();
+        match self {
+            Self::TwoD => text.preview_view_mode_2d,
+            Self::ThreeD => text.preview_view_mode_3d,
         }
     }
 }
@@ -68,6 +95,77 @@ pub struct PreviewOutput {
 }
 
 impl ViewportState {
+    pub fn with_view_mode(view_mode: PreviewViewMode) -> Self {
+        let mut state = Self::default();
+        state.view_mode = view_mode;
+        state
+    }
+
+    pub fn view_mode(&self) -> PreviewViewMode {
+        self.view_mode
+    }
+
+    pub fn set_view_mode(&mut self, view_mode: PreviewViewMode) {
+        if self.view_mode != view_mode {
+            self.view_mode = view_mode;
+            self.active_object_id = None;
+        }
+    }
+
+    fn pan(&self) -> Vec2 {
+        match self.view_mode {
+            PreviewViewMode::TwoD => self.pan_2d,
+            PreviewViewMode::ThreeD => self.pan_3d,
+        }
+    }
+
+    fn pan_mut(&mut self) -> &mut Vec2 {
+        match self.view_mode {
+            PreviewViewMode::TwoD => &mut self.pan_2d,
+            PreviewViewMode::ThreeD => &mut self.pan_3d,
+        }
+    }
+
+    fn zoom(&self) -> f32 {
+        match self.view_mode {
+            PreviewViewMode::TwoD => self.zoom_2d,
+            PreviewViewMode::ThreeD => self.zoom_3d,
+        }
+    }
+
+    fn zoom_mut(&mut self) -> &mut f32 {
+        match self.view_mode {
+            PreviewViewMode::TwoD => &mut self.zoom_2d,
+            PreviewViewMode::ThreeD => &mut self.zoom_3d,
+        }
+    }
+
+    fn zoom_limits(&self) -> (f32, f32) {
+        match self.view_mode {
+            PreviewViewMode::TwoD => (0.05, 5.0),
+            PreviewViewMode::ThreeD => (0.55, 2.4),
+        }
+    }
+
+    fn pan_from_pointer_delta(
+        &mut self,
+        response: &egui::Response,
+        ui: &egui::Ui,
+        view_projection: Mat4,
+    ) {
+        let Some(pointer) = response.interact_pointer_pos() else {
+            return;
+        };
+        let pointer_delta = ui.input(|input| input.pointer.delta());
+        let previous = pointer - pointer_delta;
+        if let (Some(current_mm), Some(previous_mm)) = (
+            screen_to_bed(pointer, response.rect, view_projection),
+            screen_to_bed(previous, response.rect, view_projection),
+        ) {
+            *self.pan_mut() += previous_mm - current_mm;
+        }
+    }
+
     fn handle_input(
         &mut self,
         response: &egui::Response,
@@ -151,33 +249,45 @@ impl ViewportState {
         }
 
         if response.dragged_by(egui::PointerButton::Primary) {
-            let drag = response.drag_motion();
-            self.yaw -= drag.x * 0.01;
-            self.pitch = (self.pitch + drag.y * 0.01).clamp(0.2, 1.35);
+            match self.view_mode {
+                PreviewViewMode::TwoD => self.pan_from_pointer_delta(response, ui, view_projection),
+                PreviewViewMode::ThreeD => {
+                    let drag = response.drag_motion();
+                    self.yaw -= drag.x * 0.01;
+                    self.pitch = (self.pitch + drag.y * 0.01).clamp(0.2, 1.35);
+                }
+            }
         }
 
         if response.dragged_by(egui::PointerButton::Secondary) {
-            let drag = response.drag_motion();
-            let pan_scale = scene_extent.max(40.0)
-                / response.rect.width().min(response.rect.height()).max(1.0)
-                * self.zoom;
-            let eye_direction = vec3(
-                self.yaw.cos() * self.pitch.cos(),
-                self.yaw.sin() * self.pitch.cos(),
-                self.pitch.sin(),
-            );
-            let view_direction = -eye_direction;
-            let right = view_direction.cross(Vec3::Z).normalize_or_zero();
-            let camera_up = right.cross(view_direction);
-            let up_on_plane = vec3(camera_up.x, camera_up.y, 0.0).normalize_or_zero();
-            let pan_delta = (-right * drag.x + up_on_plane * drag.y) * pan_scale;
-            self.pan += pan_delta.truncate();
+            match self.view_mode {
+                PreviewViewMode::TwoD => self.pan_from_pointer_delta(response, ui, view_projection),
+                PreviewViewMode::ThreeD => {
+                    let drag = response.drag_motion();
+                    let pan_scale = scene_extent.max(40.0)
+                        / response.rect.width().min(response.rect.height()).max(1.0)
+                        * self.zoom();
+                    let eye_direction = vec3(
+                        self.yaw.cos() * self.pitch.cos(),
+                        self.yaw.sin() * self.pitch.cos(),
+                        self.pitch.sin(),
+                    );
+                    let view_direction = -eye_direction;
+                    let right = view_direction.cross(Vec3::Z).normalize_or_zero();
+                    let camera_up = right.cross(view_direction);
+                    let up_on_plane = vec3(camera_up.x, camera_up.y, 0.0).normalize_or_zero();
+                    let pan_delta = (-right * drag.x + up_on_plane * drag.y) * pan_scale;
+                    *self.pan_mut() += pan_delta.truncate();
+                }
+            }
         }
 
         if response.hovered() {
             let scroll = ui.input(|input| input.smooth_scroll_delta.y);
             if scroll.abs() > f32::EPSILON {
-                self.zoom = (self.zoom * (1.0 - scroll * 0.0015)).clamp(0.55, 2.4);
+                let (min_zoom, max_zoom) = self.zoom_limits();
+                *self.zoom_mut() =
+                    (self.zoom() * (1.0 - scroll * 0.0015)).clamp(min_zoom, max_zoom);
             }
         }
         manipulation
@@ -664,23 +774,50 @@ fn view_projection_for_area(
     state: &ViewportState,
 ) -> Mat4 {
     let aspect = (viewport_size.x / viewport_size.y).max(0.1);
-    let center = vec3(
-        printable_area.width_mm * 0.5 + state.pan.x,
-        printable_area.height_mm * 0.5 + state.pan.y,
-        0.0,
-    );
+    let pan = state.pan();
+    let center =
+        vec3(printable_area.width_mm * 0.5 + pan.x, printable_area.height_mm * 0.5 + pan.y, 0.0);
+    match state.view_mode() {
+        PreviewViewMode::ThreeD => {
+            let scene_radius =
+                printable_area.width_mm.max(printable_area.height_mm).max(80.0) * 0.9;
+            let eye_direction = vec3(
+                state.yaw.cos() * state.pitch.cos(),
+                state.yaw.sin() * state.pitch.cos(),
+                state.pitch.sin(),
+            );
+            let eye = center + eye_direction * scene_radius * state.zoom() + vec3(0.0, 0.0, 24.0);
 
-    let scene_radius = printable_area.width_mm.max(printable_area.height_mm).max(80.0) * 0.9;
-    let eye_direction = vec3(
-        state.yaw.cos() * state.pitch.cos(),
-        state.yaw.sin() * state.pitch.cos(),
-        state.pitch.sin(),
-    );
-    let eye = center + eye_direction * scene_radius * state.zoom + vec3(0.0, 0.0, 24.0);
+            let view = Mat4::look_at_rh(eye, center + vec3(0.0, 0.0, 2.0), Vec3::Z);
+            let projection = Mat4::perspective_rh(35_f32.to_radians(), aspect, 0.1, 5_000.0);
+            projection * view
+        }
+        PreviewViewMode::TwoD => {
+            let half_extents = orthographic_half_extents(printable_area, aspect, state.zoom());
+            let eye = center + vec3(0.0, 0.0, 1_000.0);
+            let view = Mat4::look_at_rh(eye, center, Vec3::Y);
+            let projection = Mat4::orthographic_rh(
+                -half_extents.x,
+                half_extents.x,
+                -half_extents.y,
+                half_extents.y,
+                0.1,
+                2_000.0,
+            );
+            projection * view
+        }
+    }
+}
 
-    let view = Mat4::look_at_rh(eye, center + vec3(0.0, 0.0, 2.0), Vec3::Z);
-    let projection = Mat4::perspective_rh(35_f32.to_radians(), aspect, 0.1, 5_000.0);
-    projection * view
+fn orthographic_half_extents(printable_area: PrintableArea, aspect: f32, zoom: f32) -> Vec2 {
+    let mut half_width = (printable_area.width_mm * 0.5 + 20.0).max(40.0);
+    let mut half_height = (printable_area.height_mm * 0.5 + 20.0).max(40.0);
+    if half_width / half_height < aspect {
+        half_width = half_height * aspect;
+    } else {
+        half_height = half_width / aspect;
+    }
+    Vec2::new(half_width, half_height) * zoom
 }
 
 pub fn project_bed_point(
@@ -978,4 +1115,25 @@ fn point_out_of_bounds(point: Vec3, printable_area: PrintableArea) -> bool {
         || point.y < -0.01
         || point.x > printable_area.width_mm + 0.01
         || point.y > printable_area.height_mm + 0.01
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_d_projection_round_trips_bed_points() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let state = ViewportState::with_view_mode(PreviewViewMode::TwoD);
+        let view_projection =
+            view_projection_for_area(PrintableArea::new(220.0, 180.0), rect.size(), &state);
+        let point = Vec2::new(145.0, 72.5);
+
+        let projected = project_bed_point(point, rect, view_projection)
+            .expect("point should project in 2D mode");
+        let restored =
+            screen_to_bed(projected, rect, view_projection).expect("screen point should unproject");
+
+        assert!((restored - point).length() < 1e-3);
+    }
 }
