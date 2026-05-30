@@ -798,10 +798,9 @@ impl PenarticApp {
                         let language = self.language;
                         let text = self.text();
 
-                        if ui.button(text.load_svg).clicked() {
+                        if ui.button(text.load_svg).on_hover_text(text.load_svg_hint).clicked() {
                             self.pick_svg();
                         }
-                        ui.small(text.load_svg_hint);
 
                         if self.toolpath_plan.is_some() {
                             let mut open_gcode_window = false;
@@ -1056,6 +1055,7 @@ impl PenarticApp {
                                 self.settings.print_start_mode == PrintStartMode::HomeBeforePrint;
                             if ui
                                 .checkbox(&mut start_with_home, text.home_xy_before_print)
+                                .on_hover_text(text.direct_start_without_home_hint)
                                 .changed()
                             {
                                 self.settings.print_start_mode = if start_with_home {
@@ -1064,9 +1064,6 @@ impl PenarticApp {
                                     PrintStartMode::DirectFromCurrentPosition
                                 };
                                 print_start_mode_changed = true;
-                            }
-                            if !start_with_home {
-                                ui.small(text.direct_start_without_home_hint);
                             }
 
                             let can_move_to_first_draw_point = first_draw_point.is_some()
@@ -1288,12 +1285,13 @@ impl PenarticApp {
                                     );
                                 });
                             settings_changed |= previous_pattern != self.settings.fill_pattern;
-                            settings_changed |= drag_value_row(
+                            settings_changed |= drag_value_row_tooltip(
                                 ui,
                                 text.fill_spacing,
                                 &mut self.settings.fill_spacing_mm,
                                 0.1,
                                 MIN_FILL_SPACING_MM..=MAX_FILL_SPACING_MM,
+                                text.fill_spacing_hint,
                             );
                             settings_changed |= drag_value_row(
                                 ui,
@@ -1302,7 +1300,6 @@ impl PenarticApp {
                                 1.0,
                                 0.0..=179.0,
                             );
-                            ui.small(text.fill_spacing_hint);
                         }
 
                         if settings_changed || print_start_mode_changed {
@@ -1532,6 +1529,24 @@ impl PenarticApp {
                 {
                     self.delete_selected_svg();
                 }
+
+                toolbar_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut preview_view_mode = self.viewport_state.view_mode();
+                    egui::ComboBox::from_id_salt("preview-view-mode")
+                        .width(72.0)
+                        .selected_text(preview_view_mode.label(self.language))
+                        .show_ui(ui, |ui| {
+                            for view_mode in PreviewViewMode::ALL {
+                                ui.selectable_value(
+                                    &mut preview_view_mode,
+                                    view_mode,
+                                    view_mode.label(self.language),
+                                );
+                            }
+                        });
+                    self.viewport_state.set_view_mode(preview_view_mode);
+                    ui.label(text.preview_view_mode);
+                });
             });
 
         self.paint_selected_object_gizmo(ui, preview_rect, view_projection, object_bounds);
@@ -1674,22 +1689,6 @@ impl PenarticApp {
                         self.preview_progress = 0.0;
                         self.preview_playing = false;
                     }
-
-                    ui.label(text.preview_view_mode);
-                    let mut preview_view_mode = self.viewport_state.view_mode();
-                    egui::ComboBox::from_id_salt("preview-view-mode")
-                        .width(72.0)
-                        .selected_text(preview_view_mode.label(self.language))
-                        .show_ui(ui, |ui| {
-                            for view_mode in PreviewViewMode::ALL {
-                                ui.selectable_value(
-                                    &mut preview_view_mode,
-                                    view_mode,
-                                    view_mode.label(self.language),
-                                );
-                            }
-                        });
-                    self.viewport_state.set_view_mode(preview_view_mode);
 
                     ui.checkbox(&mut self.show_travel_moves, text.show_pen_lift_travel_paths);
                     ui.checkbox(&mut self.show_drawing_bounds, text.show_bounding_box);
@@ -1888,6 +1887,25 @@ fn drag_value_row(
         ui.label(label);
         changed = ui
             .add(egui::DragValue::new(value).speed(speed).range(range).fixed_decimals(2))
+            .changed();
+    });
+    changed
+}
+
+fn drag_value_row_tooltip(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    speed: f64,
+    range: std::ops::RangeInclusive<f32>,
+    tooltip: &str,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        changed = ui
+            .add(egui::DragValue::new(value).speed(speed).range(range).fixed_decimals(2))
+            .on_hover_text(tooltip)
             .changed();
     });
     changed
