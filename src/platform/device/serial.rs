@@ -39,6 +39,8 @@ pub(super) fn run_serial_worker(
         let mut queued_job_count = 0usize;
         let mut in_flight_lines = VecDeque::new();
         let mut in_flight_job_count = 0usize;
+        let mut total_job_lines = 0usize;
+        let mut last_progress_percent = None;
         let mut job_cancelled = false;
         let mut read_buffer = [0_u8; 512];
         let mut pending_text = String::new();
@@ -53,6 +55,8 @@ pub(super) fn run_serial_worker(
                         let lines = clean_gcode_lines(lines);
                         if !lines.is_empty() {
                             job_cancelled = false;
+                            total_job_lines = lines.len();
+                            last_progress_percent = None;
                         }
                         queued_job_count += lines.len();
                         queued_lines.extend(
@@ -85,6 +89,8 @@ pub(super) fn run_serial_worker(
                             source: QueuedLineSource::Stop,
                         });
                         if in_flight_job_count == 0 {
+                            total_job_lines = 0;
+                            last_progress_percent = None;
                             event_tx
                                 .send(WorkerEvent::JobCancelled)
                                 .map_err(|error| error.to_string())?;
@@ -164,7 +170,21 @@ pub(super) fn run_serial_worker(
                             if let Some(acknowledged) = in_flight_lines.pop_front() {
                                 if acknowledged.source == QueuedLineSource::Job {
                                     in_flight_job_count = in_flight_job_count.saturating_sub(1);
+                                    if !job_cancelled {
+                                        if let Some(progress) = queued_job_progress_update(
+                                            total_job_lines,
+                                            queued_job_count,
+                                            in_flight_job_count,
+                                            &mut last_progress_percent,
+                                        ) {
+                                            event_tx
+                                                .send(WorkerEvent::JobProgress(progress))
+                                                .map_err(|error| error.to_string())?;
+                                        }
+                                    }
                                     if queued_job_count == 0 && in_flight_job_count == 0 {
+                                        total_job_lines = 0;
+                                        last_progress_percent = None;
                                         event_tx
                                             .send(if job_cancelled {
                                                 WorkerEvent::JobCancelled
@@ -290,6 +310,8 @@ struct WebSerialState {
     queued_job_count: usize,
     in_flight_lines: VecDeque<QueuedLine>,
     in_flight_job_count: usize,
+    total_job_lines: usize,
+    last_progress_percent: Option<u8>,
     job_active: bool,
     job_cancelled: bool,
     ready: bool,
@@ -315,6 +337,8 @@ impl WebSerialShared {
             queued_job_count: 0,
             in_flight_lines: VecDeque::new(),
             in_flight_job_count: 0,
+            total_job_lines: 0,
+            last_progress_percent: None,
             job_active: false,
             job_cancelled: false,
             ready: false,
@@ -345,6 +369,8 @@ impl WebSerialShared {
             let WebSerialState {
                 in_flight_lines,
                 in_flight_job_count,
+                total_job_lines,
+                last_progress_percent,
                 job_active,
                 job_cancelled,
                 events,
@@ -353,7 +379,9 @@ impl WebSerialShared {
             acknowledge_web_queued_line(
                 in_flight_lines,
                 in_flight_job_count,
+                total_job_lines,
                 queued_job_count,
+                last_progress_percent,
                 job_active,
                 job_cancelled,
                 events,
@@ -388,6 +416,8 @@ async fn web_writer_loop(shared: WebSerialShared) {
                         if !lines.is_empty() {
                             state.job_active = true;
                             state.job_cancelled = false;
+                            state.total_job_lines = lines.len();
+                            state.last_progress_percent = None;
                         }
                         state.queued_job_count += lines.len();
                         state.queued_lines.extend(
@@ -420,6 +450,8 @@ async fn web_writer_loop(shared: WebSerialShared) {
                             source: QueuedLineSource::Stop,
                         });
                         if state.in_flight_job_count == 0 {
+                            state.total_job_lines = 0;
+                            state.last_progress_percent = None;
                             state.events.push(WorkerEvent::JobCancelled);
                             state.job_active = false;
                             state.job_cancelled = false;

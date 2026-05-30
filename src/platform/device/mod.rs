@@ -134,6 +134,7 @@ pub struct DeviceController {
     detected_area: Option<PrintableArea>,
     log: VecDeque<String>,
     last_error: Option<String>,
+    print_progress: Option<f32>,
     #[cfg(not(target_arch = "wasm32"))]
     worker: Option<NativeWorker>,
     #[cfg(target_arch = "wasm32")]
@@ -153,6 +154,7 @@ impl DeviceController {
             detected_area: None,
             log: VecDeque::new(),
             last_error: None,
+            print_progress: None,
             #[cfg(not(target_arch = "wasm32"))]
             worker: None,
             #[cfg(target_arch = "wasm32")]
@@ -248,6 +250,10 @@ impl DeviceController {
         self.print_state
     }
 
+    pub fn print_progress(&self) -> Option<f32> {
+        self.print_progress
+    }
+
     pub fn firmware_summary(&self) -> Option<&str> {
         self.firmware_summary.as_deref()
     }
@@ -262,6 +268,10 @@ impl DeviceController {
 
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
+    }
+
+    fn set_print_progress(&mut self, progress: Option<f32>) {
+        self.print_progress = progress.map(|value| value.clamp(0.0, 1.0));
     }
 
     pub fn refresh_serial_ports(&mut self) {
@@ -397,6 +407,7 @@ impl DeviceController {
             self.worker = Some(worker);
             self.connection_state = ConnectionState::Connecting;
             self.print_state = PrintState::Idle;
+            self.set_print_progress(None);
             self.last_error = None;
             self.firmware_summary = None;
             self.detected_area = None;
@@ -425,6 +436,7 @@ impl DeviceController {
             self.worker = Some(worker);
             self.connection_state = ConnectionState::Connecting;
             self.print_state = PrintState::Idle;
+            self.set_print_progress(None);
             self.last_error = None;
             self.firmware_summary = None;
             self.detected_area = None;
@@ -476,6 +488,7 @@ impl DeviceController {
             worker.queue_command(WorkerCommand::Disconnect);
             self.connection_state = ConnectionState::Disconnected;
             self.print_state = PrintState::Idle;
+            self.set_print_progress(None);
             self.connected_target_label = None;
             self.push_log(self.text().closed_device_connection.to_owned());
         }
@@ -490,6 +503,7 @@ impl DeviceController {
         {
             self.connection_state = ConnectionState::Disconnected;
             self.print_state = PrintState::Idle;
+            self.set_print_progress(None);
             self.connected_target_label = None;
         }
     }
@@ -505,6 +519,7 @@ impl DeviceController {
                 self.worker.as_ref().ok_or_else(|| self.text().connect_device_first.to_owned())?;
             worker.queue_command(WorkerCommand::QueueJob(gcode_lines.to_vec()));
             self.print_state = PrintState::Printing;
+            self.set_print_progress(Some(0.0));
             self.push_log(self.text().queued_gcode_lines(gcode_lines.len()));
             Ok(())
         }
@@ -519,6 +534,7 @@ impl DeviceController {
                 .map_err(|_| self.text().failed_to_queue_gcode_to_device.to_owned())?;
 
             self.print_state = PrintState::Printing;
+            self.set_print_progress(Some(0.0));
             self.push_log(self.text().queued_gcode_lines(gcode_lines.len()));
             Ok(())
         }
@@ -535,6 +551,7 @@ impl DeviceController {
                 self.worker.as_ref().ok_or_else(|| self.text().connect_device_first.to_owned())?;
             worker.queue_command(WorkerCommand::CancelJob);
             self.print_state = PrintState::Stopping;
+            self.set_print_progress(None);
             self.push_log(self.text().requested_print_stop.to_owned());
             Ok(())
         }
@@ -549,6 +566,7 @@ impl DeviceController {
                 .map_err(|_| self.text().failed_to_send_stop_command.to_owned())?;
 
             self.print_state = PrintState::Stopping;
+            self.set_print_progress(None);
             self.push_log(self.text().requested_print_stop.to_owned());
             Ok(())
         }
@@ -711,27 +729,38 @@ impl DeviceController {
                 }
                 WorkerEvent::PrintStateChanged(state) => {
                     self.print_state = state;
+                    if state != PrintState::Printing {
+                        self.set_print_progress(None);
+                    }
+                }
+                WorkerEvent::JobProgress(progress) => {
+                    self.set_print_progress(Some(progress));
                 }
                 WorkerEvent::JobCompleted => {
                     self.print_state = PrintState::Idle;
+                    self.set_print_progress(None);
                     self.push_log(self.text().printing_completed.to_owned());
                 }
                 WorkerEvent::JobCancelled => {
                     self.print_state = PrintState::Idle;
+                    self.set_print_progress(None);
                     self.push_log(self.text().printing_stopped.to_owned());
                 }
                 WorkerEvent::JobFailed(error) => {
                     self.print_state = PrintState::Idle;
+                    self.set_print_progress(None);
                     self.last_error = Some(error.clone());
                     self.push_log(self.text().device_error(&error));
                 }
                 WorkerEvent::Error(error) => {
+                    self.set_print_progress(None);
                     self.last_error = Some(error.clone());
                     self.push_log(self.text().device_error(&error));
                 }
                 WorkerEvent::Disconnected => {
                     self.connection_state = ConnectionState::Disconnected;
                     self.print_state = PrintState::Idle;
+                    self.set_print_progress(None);
                     self.connected_target_label = None;
                 }
             }
@@ -772,23 +801,33 @@ impl DeviceController {
                 }
                 WorkerEvent::PrintStateChanged(state) => {
                     self.print_state = state;
+                    if state != PrintState::Printing {
+                        self.set_print_progress(None);
+                    }
+                }
+                WorkerEvent::JobProgress(progress) => {
+                    self.set_print_progress(Some(progress));
                 }
                 WorkerEvent::JobCompleted => {
                     self.print_state = PrintState::Idle;
+                    self.set_print_progress(None);
                     self.push_log(self.text().printing_completed.to_owned());
                 }
                 WorkerEvent::JobCancelled => {
                     self.print_state = PrintState::Idle;
+                    self.set_print_progress(None);
                     self.push_log(self.text().printing_stopped.to_owned());
                 }
                 WorkerEvent::JobFailed(error) => {
                     self.print_state = PrintState::Idle;
+                    self.set_print_progress(None);
                     self.last_error = Some(error.clone());
                     self.push_log(self.text().device_error(&error));
                 }
                 WorkerEvent::Error(error) => {
                     self.connection_state = ConnectionState::Disconnected;
                     self.print_state = PrintState::Idle;
+                    self.set_print_progress(None);
                     self.last_error = Some(error.clone());
                     self.connected_target_label = None;
                     self.push_log(self.text().device_error(&error));
@@ -796,6 +835,7 @@ impl DeviceController {
                 WorkerEvent::Disconnected => {
                     self.connection_state = ConnectionState::Disconnected;
                     self.print_state = PrintState::Idle;
+                    self.set_print_progress(None);
                     self.connected_target_label = None;
                 }
             }
@@ -890,6 +930,7 @@ enum WorkerEvent {
     FirmwareSummary(String),
     DetectedArea(PrintableArea),
     PrintStateChanged(PrintState),
+    JobProgress(f32),
     JobCompleted,
     JobCancelled,
     JobFailed(String),
@@ -994,6 +1035,44 @@ fn clean_gcode_lines(lines: Vec<String>) -> Vec<String> {
             (!command.is_empty()).then(|| command.to_owned())
         })
         .collect()
+}
+
+pub(super) fn next_progress_update(
+    progress: f32,
+    last_emitted_progress_percent: &mut Option<u8>,
+) -> Option<f32> {
+    if !progress.is_finite() {
+        return None;
+    }
+
+    let progress = progress.clamp(0.0, 1.0);
+    let percent = (progress * 100.0).floor() as u8;
+    if Some(percent) == *last_emitted_progress_percent {
+        return None;
+    }
+
+    *last_emitted_progress_percent = Some(percent);
+    Some(progress)
+}
+
+pub(super) fn queued_job_progress_update(
+    total_job_lines: usize,
+    queued_job_count: usize,
+    in_flight_job_count: usize,
+    last_emitted_progress_percent: &mut Option<u8>,
+) -> Option<f32> {
+    if total_job_lines == 0 {
+        return None;
+    }
+
+    let outstanding = queued_job_count.saturating_add(in_flight_job_count).min(total_job_lines);
+    let completed = total_job_lines.saturating_sub(outstanding);
+    if completed >= total_job_lines {
+        *last_emitted_progress_percent = Some(100);
+        return None;
+    }
+
+    next_progress_update(completed as f32 / total_job_lines as f32, last_emitted_progress_percent)
 }
 
 fn initial_probe_commands() -> Vec<String> {
@@ -1388,6 +1467,27 @@ mod tests {
     }
 
     #[test]
+    fn throttles_progress_updates_by_whole_percent() {
+        let mut last_percent = None;
+        let first = next_progress_update(0.101, &mut last_percent).unwrap();
+        assert!((first - 0.101).abs() < f32::EPSILON);
+        assert_eq!(next_progress_update(0.109, &mut last_percent), None);
+
+        let second = next_progress_update(0.111, &mut last_percent).unwrap();
+        assert!((second - 0.111).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn queue_progress_stops_emitting_once_job_completes() {
+        let mut last_percent = None;
+        let progress = queued_job_progress_update(4, 1, 2, &mut last_percent).unwrap();
+        assert!((progress - 0.25).abs() < f32::EPSILON);
+        assert_eq!(queued_job_progress_update(4, 1, 2, &mut last_percent), None);
+        assert_eq!(queued_job_progress_update(4, 0, 0, &mut last_percent), None);
+        assert_eq!(last_percent, Some(100));
+    }
+
+    #[test]
     fn builds_absolute_xy_move_sequence_for_manual_positioning() {
         let commands = build_absolute_xy_move_commands(12.5, 4.0, 1800.0);
         assert_eq!(
@@ -1435,6 +1535,8 @@ mod tests {
             QueuedLine { line: "G1 X1".to_owned(), source: QueuedLineSource::Job },
         ]);
         let mut in_flight_job_count = 1;
+        let mut total_job_lines = 1;
+        let mut last_progress_percent = None;
         let queued_job_count = 0;
         let mut job_active = true;
         let mut job_cancelled = false;
@@ -1444,15 +1546,18 @@ mod tests {
             "ok\nok\n",
             &mut in_flight,
             &mut in_flight_job_count,
+            &mut total_job_lines,
             &queued_job_count,
             &mut job_active,
             &mut job_cancelled,
+            &mut last_progress_percent,
             &event_tx,
             Language::English,
         )
         .unwrap();
 
         assert_eq!(in_flight_job_count, 0);
+        assert_eq!(total_job_lines, 0);
         assert!(!job_active);
         assert!(matches!(event_rx.try_recv(), Ok(WorkerEvent::Line(_))));
         assert!(matches!(event_rx.try_recv(), Ok(WorkerEvent::JobCompleted)));
@@ -1466,6 +1571,8 @@ mod tests {
             QueuedLine { line: "M400".to_owned(), source: QueuedLineSource::Job },
         ]);
         let mut in_flight_job_count = 2;
+        let mut total_job_lines = 2;
+        let mut last_progress_percent = None;
         let queued_job_count = 0;
         let mut job_active = true;
         let mut job_cancelled = false;
@@ -1475,16 +1582,22 @@ mod tests {
             "okok",
             &mut in_flight,
             &mut in_flight_job_count,
+            &mut total_job_lines,
             &queued_job_count,
             &mut job_active,
             &mut job_cancelled,
+            &mut last_progress_percent,
             &event_tx,
             Language::English,
         )
         .unwrap();
 
         assert_eq!(in_flight_job_count, 0);
+        assert_eq!(total_job_lines, 0);
         assert!(!job_active);
+        assert!(
+            matches!(event_rx.try_recv(), Ok(WorkerEvent::JobProgress(progress)) if (progress - 0.5).abs() < f32::EPSILON)
+        );
         assert!(matches!(event_rx.try_recv(), Ok(WorkerEvent::JobCompleted)));
     }
 

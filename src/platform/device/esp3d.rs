@@ -67,6 +67,8 @@ fn run_esp3d_websocket_worker(
         let mut queued_job_count = 0usize;
         let mut in_flight_lines = VecDeque::new();
         let mut in_flight_job_count = 0usize;
+        let mut total_job_lines = 0usize;
+        let mut last_progress_percent = None;
         let mut job_active = false;
         let mut job_cancelled = false;
 
@@ -78,6 +80,8 @@ fn run_esp3d_websocket_worker(
                         if !lines.is_empty() {
                             job_active = true;
                             job_cancelled = false;
+                            total_job_lines = lines.len();
+                            last_progress_percent = None;
                         }
                         queued_job_count += lines.len();
                         queued_lines.extend(
@@ -113,9 +117,12 @@ fn run_esp3d_websocket_worker(
                             language,
                         )?;
                         if in_flight_job_count == 0 {
+                            total_job_lines = 0;
+                            last_progress_percent = None;
                             event_tx
                                 .send(WorkerEvent::JobCancelled)
                                 .map_err(|error| error.to_string())?;
+                            job_active = false;
                             job_cancelled = false;
                         }
                     }
@@ -138,9 +145,11 @@ fn run_esp3d_websocket_worker(
                         text.as_str(),
                         &mut in_flight_lines,
                         &mut in_flight_job_count,
+                        &mut total_job_lines,
                         &queued_job_count,
                         &mut job_active,
                         &mut job_cancelled,
+                        &mut last_progress_percent,
                         &event_tx,
                         language,
                     )?;
@@ -151,9 +160,11 @@ fn run_esp3d_websocket_worker(
                         &text,
                         &mut in_flight_lines,
                         &mut in_flight_job_count,
+                        &mut total_job_lines,
                         &queued_job_count,
                         &mut job_active,
                         &mut job_cancelled,
+                        &mut last_progress_percent,
                         &event_tx,
                         language,
                     )?;
@@ -189,9 +200,11 @@ pub(super) fn handle_esp3d_websocket_text(
     text: &str,
     in_flight_lines: &mut VecDeque<QueuedLine>,
     in_flight_job_count: &mut usize,
+    total_job_lines: &mut usize,
     queued_job_count: &usize,
     job_active: &mut bool,
     job_cancelled: &mut bool,
+    last_progress_percent: &mut Option<u8>,
     event_tx: &std::sync::mpsc::Sender<WorkerEvent>,
     language: Language,
 ) -> Result<(), String> {
@@ -200,7 +213,9 @@ pub(super) fn handle_esp3d_websocket_text(
             acknowledge_queued_line(
                 in_flight_lines,
                 in_flight_job_count,
+                total_job_lines,
                 *queued_job_count,
+                last_progress_percent,
                 job_active,
                 job_cancelled,
                 event_tx,
@@ -258,7 +273,9 @@ fn top_up_esp3d_websocket_queue(
 fn acknowledge_queued_line(
     in_flight_lines: &mut VecDeque<QueuedLine>,
     in_flight_job_count: &mut usize,
+    total_job_lines: &mut usize,
     queued_job_count: usize,
+    last_progress_percent: &mut Option<u8>,
     job_active: &mut bool,
     job_cancelled: &mut bool,
     event_tx: &std::sync::mpsc::Sender<WorkerEvent>,
@@ -269,12 +286,26 @@ fn acknowledge_queued_line(
 
     if acknowledged.source == QueuedLineSource::Job {
         *in_flight_job_count = (*in_flight_job_count).saturating_sub(1);
+        if !*job_cancelled {
+            if let Some(progress) = queued_job_progress_update(
+                *total_job_lines,
+                queued_job_count,
+                *in_flight_job_count,
+                last_progress_percent,
+            ) {
+                event_tx
+                    .send(WorkerEvent::JobProgress(progress))
+                    .map_err(|error| error.to_string())?;
+            }
+        }
     }
 
     if *job_active && queued_job_count == 0 && *in_flight_job_count == 0 {
         let has_in_flight_job =
             in_flight_lines.iter().any(|line| line.source == QueuedLineSource::Job);
         if !has_in_flight_job {
+            *total_job_lines = 0;
+            *last_progress_percent = None;
             event_tx
                 .send(if *job_cancelled {
                     WorkerEvent::JobCancelled
@@ -367,6 +398,8 @@ fn run_esp3d_http_worker(
 
         let mut queued_lines: VecDeque<QueuedLine> = VecDeque::new();
         let mut queued_job_count = 0usize;
+        let mut total_job_lines = 0usize;
+        let mut last_progress_percent = None;
         let mut job_cancelled = false;
 
         loop {
@@ -376,6 +409,8 @@ fn run_esp3d_http_worker(
                         let lines = clean_gcode_lines(lines);
                         if !lines.is_empty() {
                             job_cancelled = false;
+                            total_job_lines = lines.len();
+                            last_progress_percent = None;
                         }
                         queued_job_count += lines.len();
                         queued_lines.extend(
@@ -406,6 +441,8 @@ fn run_esp3d_http_worker(
                             line: "M410".to_owned(),
                             source: QueuedLineSource::Stop,
                         });
+                        total_job_lines = 0;
+                        last_progress_percent = None;
                         event_tx
                             .send(WorkerEvent::JobCancelled)
                             .map_err(|error| error.to_string())?;
@@ -421,7 +458,21 @@ fn run_esp3d_http_worker(
 
                 if queued.source == QueuedLineSource::Job {
                     queued_job_count = queued_job_count.saturating_sub(1);
+                    if !job_cancelled {
+                        if let Some(progress) = queued_job_progress_update(
+                            total_job_lines,
+                            queued_job_count,
+                            0,
+                            &mut last_progress_percent,
+                        ) {
+                            event_tx
+                                .send(WorkerEvent::JobProgress(progress))
+                                .map_err(|error| error.to_string())?;
+                        }
+                    }
                     if queued_job_count == 0 {
+                        total_job_lines = 0;
+                        last_progress_percent = None;
                         event_tx
                             .send(if job_cancelled {
                                 WorkerEvent::JobCancelled
@@ -629,6 +680,8 @@ struct WebSocketState {
     queued_job_count: usize,
     in_flight_lines: VecDeque<QueuedLine>,
     in_flight_job_count: usize,
+    total_job_lines: usize,
+    last_progress_percent: Option<u8>,
     job_active: bool,
     job_cancelled: bool,
     ready: bool,
@@ -646,6 +699,8 @@ impl WebSocketShared {
             queued_job_count: 0,
             in_flight_lines: VecDeque::new(),
             in_flight_job_count: 0,
+            total_job_lines: 0,
+            last_progress_percent: None,
             job_active: false,
             job_cancelled: false,
             ready: false,
@@ -669,6 +724,8 @@ impl WebSocketShared {
                 let WebSocketState {
                     in_flight_lines,
                     in_flight_job_count,
+                    total_job_lines,
+                    last_progress_percent,
                     job_active,
                     job_cancelled,
                     events,
@@ -677,7 +734,9 @@ impl WebSocketShared {
                 acknowledge_web_queued_line(
                     in_flight_lines,
                     in_flight_job_count,
+                    total_job_lines,
                     queued_job_count,
+                    last_progress_percent,
                     job_active,
                     job_cancelled,
                     events,
@@ -716,6 +775,8 @@ async fn websocket_writer_loop(shared: WebSocketShared, socket: WebSocket) {
                         if !lines.is_empty() {
                             state.job_active = true;
                             state.job_cancelled = false;
+                            state.total_job_lines = lines.len();
+                            state.last_progress_percent = None;
                         }
                         state.queued_job_count += lines.len();
                         state.queued_lines.extend(
@@ -778,6 +839,8 @@ async fn websocket_writer_loop(shared: WebSocketShared, socket: WebSocket) {
                             });
                         }
                         if state.in_flight_job_count == 0 {
+                            state.total_job_lines = 0;
+                            state.last_progress_percent = None;
                             state.events.push(WorkerEvent::JobCancelled);
                             state.job_active = false;
                             state.job_cancelled = false;
@@ -826,7 +889,9 @@ async fn websocket_writer_loop(shared: WebSocketShared, socket: WebSocket) {
 pub(super) fn acknowledge_web_queued_line(
     in_flight_lines: &mut VecDeque<QueuedLine>,
     in_flight_job_count: &mut usize,
+    total_job_lines: &mut usize,
     queued_job_count: usize,
+    last_progress_percent: &mut Option<u8>,
     job_active: &mut bool,
     job_cancelled: &mut bool,
     events: &WebEventQueue,
@@ -837,12 +902,24 @@ pub(super) fn acknowledge_web_queued_line(
 
     if acknowledged.source == QueuedLineSource::Job {
         *in_flight_job_count = (*in_flight_job_count).saturating_sub(1);
+        if !*job_cancelled {
+            if let Some(progress) = queued_job_progress_update(
+                *total_job_lines,
+                queued_job_count,
+                *in_flight_job_count,
+                last_progress_percent,
+            ) {
+                events.push(WorkerEvent::JobProgress(progress));
+            }
+        }
     }
 
     if *job_active && queued_job_count == 0 && *in_flight_job_count == 0 {
         let has_in_flight_job =
             in_flight_lines.iter().any(|line| line.source == QueuedLineSource::Job);
         if !has_in_flight_job {
+            *total_job_lines = 0;
+            *last_progress_percent = None;
             events.push(if *job_cancelled {
                 WorkerEvent::JobCancelled
             } else {

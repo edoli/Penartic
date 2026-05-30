@@ -33,7 +33,7 @@ The product must remain useful even when no device is connected:
 4. If build volume information is detected, update the printable area and rebuild the toolpath without rewriting the current SVG placement or scale.
 5. Choose whether print start should home XY first or begin directly from the current position; the default is direct-start without XY homing.
 6. Use the built-in jog/home controls for XY and Z when manual positioning is needed, use Motors Off to release the steppers after manual setup, and use the dedicated positioning helpers to move directly to either the first drawing start point or the current timeline preview position with the same absolute XY motion flow.
-7. Queue the generated G-code to the device, stop it if needed, and keep invalid actions disabled while the current state is active.
+7. Queue the generated G-code to the device, stop it if needed, show a print progress bar while progress is known, and keep invalid actions disabled while the current state is active.
 
 ### 2.3 Motion semantics
 
@@ -141,6 +141,7 @@ updated with the same value to avoid WGPU validation errors.
 - detected printable area changes are applied only when the reported size actually changes, to avoid redundant rebuild churn
 - printable area changes rebuild the preview/toolpath but do not overwrite user-adjusted SVG object placement, independent X/Y scale, local size, or rotation
 - printing state is tracked explicitly so start/stop/connect/disconnect controls can be enabled only when valid
+- the device panel shows a transport-aware progress bar while a job is active: serial and ESP3D use queued/in-flight command progress, while OctoPrint uses `/api/job` `progress.completion` when the server reports it
 - the connection-method selector is only editable while disconnected, and each method shows only its own relevant settings inputs
 - the UI keeps polling the native serial worker while a device is connected or connecting, so asynchronous probe responses can update settings after the initial click frame
 - direct jog/home controls send synchronized metric movement commands for XY and Z when no print job is active

@@ -44,6 +44,7 @@ pub(super) fn run_octoprint_worker(
             .map_err(|error| error.to_string())?;
 
         let mut observed_print_state = print_state_from_printer(&printer);
+        let mut last_progress_percent = None;
         if observed_print_state != PrintState::Idle {
             event_tx
                 .send(WorkerEvent::PrintStateChanged(observed_print_state))
@@ -60,6 +61,7 @@ pub(super) fn run_octoprint_worker(
                         &command_rx,
                         &event_tx,
                         &mut observed_print_state,
+                        &mut last_progress_percent,
                     )? {
                         return Ok(());
                     }
@@ -71,6 +73,21 @@ pub(super) fn run_octoprint_worker(
             let printer = service.printer()?;
             ensure_printer_ready(&printer, language)?;
             let next_print_state = print_state_from_printer(&printer);
+            if next_print_state == PrintState::Printing
+                && observed_print_state != PrintState::Stopping
+            {
+                if let Ok(job) = service.job() {
+                    if let Some(progress) = job.progress_fraction().and_then(|progress| {
+                        next_progress_update(progress, &mut last_progress_percent)
+                    }) {
+                        event_tx
+                            .send(WorkerEvent::JobProgress(progress))
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+            } else {
+                last_progress_percent = None;
+            }
             emit_print_state_transition(observed_print_state, next_print_state, &event_tx)?;
             observed_print_state = next_print_state;
         }
@@ -90,16 +107,29 @@ fn handle_worker_command(
     command_rx: &std::sync::mpsc::Receiver<WorkerCommand>,
     event_tx: &std::sync::mpsc::Sender<WorkerEvent>,
     observed_print_state: &mut PrintState,
+    last_progress_percent: &mut Option<u8>,
 ) -> Result<bool, String> {
     if matches!(first_command, WorkerCommand::Disconnect) {
         return Ok(true);
     }
-    process_worker_command(service, first_command, event_tx, observed_print_state)?;
+    process_worker_command(
+        service,
+        first_command,
+        event_tx,
+        observed_print_state,
+        last_progress_percent,
+    )?;
     while let Ok(command) = command_rx.try_recv() {
         if matches!(command, WorkerCommand::Disconnect) {
             return Ok(true);
         }
-        process_worker_command(service, command, event_tx, observed_print_state)?;
+        process_worker_command(
+            service,
+            command,
+            event_tx,
+            observed_print_state,
+            last_progress_percent,
+        )?;
     }
     Ok(false)
 }
@@ -110,6 +140,7 @@ fn process_worker_command(
     command: WorkerCommand,
     event_tx: &std::sync::mpsc::Sender<WorkerEvent>,
     observed_print_state: &mut PrintState,
+    last_progress_percent: &mut Option<u8>,
 ) -> Result<(), String> {
     match command {
         WorkerCommand::QueueJob(lines) => {
@@ -118,6 +149,7 @@ fn process_worker_command(
                 return Ok(());
             }
 
+            *last_progress_percent = None;
             if let Err(error) =
                 service.upload_job(&lines).and_then(|()| service.start_uploaded_job())
             {
@@ -141,6 +173,7 @@ fn process_worker_command(
             }
         }
         WorkerCommand::CancelJob => {
+            *last_progress_percent = None;
             service.cancel_job()?;
             if *observed_print_state != PrintState::Stopping {
                 *observed_print_state = PrintState::Stopping;
@@ -283,6 +316,10 @@ impl OctoPrintService {
         self.get_json("/api/printer")
     }
 
+    fn job(&self) -> Result<OctoPrintJobResponse, String> {
+        self.get_json("/api/job")
+    }
+
     fn send_commands(&self, commands: &[String]) -> Result<(), String> {
         self.post_json("/api/printer/command", &OctoPrintCommandRequest { commands })
     }
@@ -400,6 +437,24 @@ struct OctoPrintPrinterResponse {
     state: OctoPrintPrinterState,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct OctoPrintJobResponse {
+    #[serde(default)]
+    progress: OctoPrintJobProgress,
+}
+
+impl OctoPrintJobResponse {
+    fn progress_fraction(&self) -> Option<f32> {
+        let completion = self.progress.completion?;
+        completion.is_finite().then(|| (completion / 100.0).clamp(0.0, 1.0))
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OctoPrintJobProgress {
+    completion: Option<f32>,
+}
+
 #[derive(Debug, Deserialize)]
 struct OctoPrintPrinterState {
     flags: OctoPrintPrinterFlags,
@@ -457,8 +512,9 @@ struct OctoPrintJobRequest<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OctoPrintPrinterProfile, OctoPrintPrinterProfilesResponse, OctoPrintProfileVolume,
-        normalize_octoprint_base_url, printable_area_from_profiles,
+        OctoPrintJobProgress, OctoPrintJobResponse, OctoPrintPrinterProfile,
+        OctoPrintPrinterProfilesResponse, OctoPrintProfileVolume, normalize_octoprint_base_url,
+        printable_area_from_profiles,
     };
     use crate::res::lang::Language;
 
@@ -510,5 +566,15 @@ mod tests {
         let area = printable_area_from_profiles(&response).unwrap();
         assert_eq!(area.width_mm, 203.2);
         assert_eq!(area.height_mm, 203.2);
+    }
+
+    #[test]
+    fn reads_job_progress_fraction_from_completion_percent() {
+        let response = OctoPrintJobResponse {
+            progress: OctoPrintJobProgress { completion: Some(42.5) },
+        };
+
+        let progress = response.progress_fraction().unwrap();
+        assert!((progress - 0.425).abs() < f32::EPSILON);
     }
 }

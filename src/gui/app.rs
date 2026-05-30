@@ -861,6 +861,14 @@ impl PenarticApp {
                                 self.device.print_state_text(),
                             );
                         });
+                        if let Some(progress) =
+                            self.device.print_progress().filter(|_| self.device.is_job_active())
+                        {
+                            ui.add_sized(
+                                [ui.available_width(), 18.0],
+                                egui::ProgressBar::new(progress).show_percentage(),
+                            );
+                        }
 
                         if let Some(firmware) = self.device.firmware_summary() {
                             ui.horizontal_top(|ui| {
