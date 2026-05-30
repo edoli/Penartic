@@ -529,6 +529,13 @@ impl DashPattern {
         Some(Self { pattern: cleaned, offset })
     }
 
+    pub fn scaled(&self, factor: f32) -> Self {
+        Self {
+            pattern: self.pattern.iter().map(|entry| entry * factor).collect(),
+            offset: self.offset * factor,
+        }
+    }
+
     fn total_length(&self) -> f32 {
         self.pattern.iter().sum()
     }

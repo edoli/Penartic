@@ -1,4 +1,6 @@
 use glam::{Vec2, vec2};
+use roxmltree::Document;
+use svgtypes::{Length, LengthUnit};
 use thiserror::Error;
 use usvg::{Node, Options, Tree, tiny_skia_path::PathSegment};
 
@@ -16,6 +18,7 @@ const OUT_OF_BOUNDS_TOLERANCE_MM: f32 = 0.01;
 const MIN_STROKE_SEGMENT_LENGTH_MM: f32 = 0.5;
 const MIN_STROKE_LENGTH_MM: f32 = 0.5;
 const MAX_STROKE_JOIN_GAP_MM: f32 = 0.5;
+const MILLIMETERS_PER_INCH: f32 = 25.4;
 
 #[derive(Debug, Clone)]
 pub struct PreparedSvg {
@@ -100,12 +103,17 @@ pub fn parse_svg_with_language(
 ) -> Result<ParsedSvg, SvgParserError> {
     let text = language.strings();
     let source_name = source_name.into();
-    let tree = Tree::from_data(bytes, &Options::default())?;
+    let options = Options::default();
+    let size_metadata_scale_mm = svg_size_metadata_scale_mm(bytes, options.dpi);
+    let tree = Tree::from_data(bytes, &options)?;
     let mut raw_strokes = Vec::new();
     let mut raw_fill_regions = Vec::new();
     let mut warning_flags = WarningFlags::default();
 
     collect_group(tree.root(), &mut raw_strokes, &mut raw_fill_regions, &mut warning_flags);
+    if let Some(scale_mm_per_unit) = size_metadata_scale_mm {
+        scale_sampled_content_to_mm(&mut raw_strokes, &mut raw_fill_regions, scale_mm_per_unit);
+    }
 
     raw_strokes.retain(|stroke| !stroke.stroke.is_empty());
     raw_fill_regions.retain(|region| !region.is_empty());
@@ -353,6 +361,75 @@ fn map_point(transform: usvg::Transform, point: usvg::tiny_skia_path::Point) -> 
     vec2(point.x, point.y)
 }
 
+fn scale_sampled_content_to_mm(
+    raw_strokes: &mut [RawStroke],
+    raw_fill_regions: &mut FillRegions,
+    scale_mm_per_unit: f32,
+) {
+    if !scale_mm_per_unit.is_finite()
+        || scale_mm_per_unit <= 0.0
+        || (scale_mm_per_unit - 1.0).abs() <= f32::EPSILON
+    {
+        return;
+    }
+
+    for raw in raw_strokes {
+        raw.stroke = raw.stroke.transformed(|point| point * scale_mm_per_unit);
+        if let Some(dash_pattern) = &mut raw.dash_pattern {
+            *dash_pattern = dash_pattern.scaled(scale_mm_per_unit);
+        }
+    }
+
+    for region in raw_fill_regions.iter_mut() {
+        *region = region.transformed(|point| point * scale_mm_per_unit);
+    }
+}
+
+fn svg_size_metadata_scale_mm(bytes: &[u8], dpi: f32) -> Option<f32> {
+    if !svg_root_declares_absolute_size(bytes) || !dpi.is_finite() || dpi <= 0.0 {
+        return None;
+    }
+
+    Some(MILLIMETERS_PER_INCH / dpi)
+}
+
+fn svg_root_declares_absolute_size(bytes: &[u8]) -> bool {
+    let xml = match std::str::from_utf8(bytes) {
+        Ok(xml) => xml,
+        Err(_) => return false,
+    };
+    let document = match Document::parse(xml) {
+        Ok(document) => document,
+        Err(_) => return false,
+    };
+    let root = document.root_element();
+    if root.tag_name().name() != "svg" {
+        return false;
+    }
+
+    ["width", "height"]
+        .into_iter()
+        .any(|attribute| root.attribute(attribute).and_then(parse_supported_root_length).is_some())
+}
+
+fn parse_supported_root_length(value: &str) -> Option<Length> {
+    let length: Length = value.parse().ok()?;
+    if !length.number.is_finite() || length.number <= 0.0 {
+        return None;
+    }
+
+    match length.unit {
+        LengthUnit::None
+        | LengthUnit::Px
+        | LengthUnit::In
+        | LengthUnit::Cm
+        | LengthUnit::Mm
+        | LengthUnit::Pt
+        | LengthUnit::Pc => Some(length),
+        LengthUnit::Percent | LengthUnit::Em | LengthUnit::Ex => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +459,59 @@ mod tests {
         assert!((polyline[0].y - 35.0).abs() <= f32::EPSILON);
         assert!((polyline[1].x - 55.0).abs() <= f32::EPSILON);
         assert!((polyline[1].y - 25.0).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn converts_explicit_svg_pixel_size_metadata_to_millimeters() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" width="96" height="48">
+                <path d="M 0 0 L 96 48" />
+            </svg>
+        "#;
+
+        let parsed = parse_svg("line.svg", svg).unwrap();
+        let printable_area = PrintableArea::new(100.0, 60.0);
+        let prepared =
+            prepare_svg(&parsed, parsed.centered_native_placement(printable_area), printable_area);
+
+        assert!((parsed.source_size().x - 25.4).abs() < 0.05);
+        assert!((parsed.source_size().y - 12.7).abs() < 0.05);
+        assert!((prepared.drawing_bounds.x - 25.4).abs() < 0.05);
+        assert!((prepared.drawing_bounds.y - 12.7).abs() < 0.05);
+    }
+
+    #[test]
+    fn converts_explicit_svg_absolute_size_metadata_with_viewbox_to_millimeters() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" width="25.4mm" height="12.7mm" viewBox="0 0 96 48">
+                <path d="M 0 0 L 96 48" />
+            </svg>
+        "#;
+
+        let parsed = parse_svg("line.svg", svg).unwrap();
+
+        assert!((parsed.source_size().x - 25.4).abs() < 0.05);
+        assert!((parsed.source_size().y - 12.7).abs() < 0.05);
+    }
+
+    #[test]
+    fn scales_svg_stroke_dasharray_when_size_metadata_declares_pixels() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" width="96" height="16">
+                <path d="M 0 8 L 96 8" fill="none" stroke="black" stroke-dasharray="32 16" />
+            </svg>
+        "#;
+
+        let parsed = parse_svg("dash.svg", svg).unwrap();
+
+        assert_eq!(parsed.strokes.len(), 2);
+        let first = flatten_stroke_to_polyline(&parsed.strokes[0]);
+        let second = flatten_stroke_to_polyline(&parsed.strokes[1]);
+        let px_to_mm = MILLIMETERS_PER_INCH / 96.0;
+        assert!((first.first().unwrap().x - 0.0).abs() < 0.05);
+        assert!((first.last().unwrap().x - 32.0 * px_to_mm).abs() < 0.05);
+        assert!((second.first().unwrap().x - 48.0 * px_to_mm).abs() < 0.05);
+        assert!((second.last().unwrap().x - 80.0 * px_to_mm).abs() < 0.05);
     }
 
     #[test]

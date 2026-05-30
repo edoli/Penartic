@@ -20,7 +20,7 @@ The product must remain useful even when no device is connected:
 1. Start the app without a device.
 2. Choose the UI language from the left sidebar (default: English), then set printable width, printable height, draw speed, Z lift height, optional G2/G3 output, tangent-based corner-smoothing controls, and SVG fill controls. The default Z lift is 1.0 mm.
 3. Load one or more SVG files through the file picker, drag-and-drop, or a native startup path used for validation.
-4. Start each SVG from its raw coordinate size interpreted as millimeters, centered once on load, then select individual SVG objects and adjust position, independent X/Y scale, local width/height in millimeters, and rotation from the object toolbar or preview gizmo controls when needed.
+4. Start each SVG from its physical document size when the root SVG declares an explicit `width` or `height`, converting CSS pixel space into millimeters before import; otherwise fall back to treating raw SVG coordinate units as millimeters. Center once on load, then select individual SVG objects and adjust position, independent X/Y scale, local width/height in millimeters, and rotation from the object toolbar or preview gizmo controls when needed.
 5. Convert each SVG into reusable IR, combine the placed objects into one preview motion/G-code job, and avoid automatically rescaling existing SVG placements when printable area settings later change.
 6. Show the completed result immediately in the preview, switch between 2D top-down and 3D perspective views as needed, then scrub backward or replay it with the timeline slider using real motion time.
 7. Open the generated G-code in a dedicated viewer when needed, then copy it to the clipboard or save it as a `.gcode` file.
@@ -166,7 +166,7 @@ updated with the same value to avoid WGPU validation errors.
 4. Capture stroke dash metadata so visible dashed spans can be generated from IR instead of being lost during parsing.
 5. Capture closed filled path contours as fill-region IR, including the SVG fill rule, so fill handling is separate from outline strokes.
 6. Compute intrinsic SVG bounds from both stroke and fill contours.
-7. On load, create a one-time centered default object placement that interprets SVG coordinate units as millimeters instead of auto-fitting to the printable area; later SVG imports append new objects instead of replacing existing ones.
+7. On load, if the root SVG declares an explicit absolute or pixel `width`/`height`, convert the parsed document from CSS pixel space into physical millimeters before stroke normalization, dash splitting, and placement; otherwise keep the existing raw-units-as-millimeters fallback. Then create a one-time centered default object placement instead of auto-fitting to the printable area; later SVG imports append new objects instead of replacing existing ones.
 8. Reuse each user-controlled SVG object placement for later rebuilds instead of auto-rescaling when printable area changes. The selected object can be deleted with Delete.
 9. Convert raw SVG coordinates into source drawing space, split dashed strokes once, merge IR
    segments shorter than 0.5 mm into neighboring segments, drop strokes whose resulting length is

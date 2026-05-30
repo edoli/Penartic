@@ -16,7 +16,9 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 log = "0.4.29"
 poll-promise = { version = "0.3.0", features = ["web"] }
 rfd = "0.17.2"
+roxmltree = "0.21.1"
 serde = { version = "1.0.228", features = ["derive"] }
+svgtypes = "0.16.1"
 thiserror = "2.0.18"
 usvg = "0.47.0"
 
