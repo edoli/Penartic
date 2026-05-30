@@ -1207,22 +1207,17 @@ impl PenarticApp {
                             0.1..=25.0,
                         );
                         let mut prefer_g2g3 = self.settings.curve_output_mode.prefers_g2g3();
-                        let mut prefer_g5 = self.settings.curve_output_mode.prefers_g5();
-                        let prefer_g2g3_changed =
-                            ui.checkbox(&mut prefer_g2g3, text.use_arc_gcode).changed();
-                        let prefer_g5_changed =
-                            ui.checkbox(&mut prefer_g5, text.use_bezier_gcode).changed();
-                        if prefer_g2g3_changed || prefer_g5_changed {
-                            self.settings.curve_output_mode =
-                                CurveOutputMode::from_flags(prefer_g2g3, prefer_g5);
+                        if ui
+                            .checkbox(&mut prefer_g2g3, text.use_arc_gcode)
+                            .on_hover_text(text.arc_export_hint)
+                            .changed()
+                        {
+                            self.settings.curve_output_mode = if prefer_g2g3 {
+                                CurveOutputMode::PreferG2G3
+                            } else {
+                                CurveOutputMode::LinearSegments
+                            };
                             settings_changed = true;
-                        }
-                        if prefer_g2g3 && prefer_g5 {
-                            ui.small(text.arc_and_bezier_export_hint);
-                        } else if prefer_g2g3 {
-                            ui.small(text.arc_export_hint);
-                        } else if prefer_g5 {
-                            ui.small(text.bezier_export_hint);
                         }
 
                         if ui
@@ -2409,7 +2404,7 @@ mod tests {
         let state = PersistedAppState {
             language: Language::Korean,
             device: DevicePreferences::default(),
-            curve_output_mode: CurveOutputMode::PreferG2G3AndG5,
+            curve_output_mode: CurveOutputMode::LinearSegments,
             preview_view_mode: PreviewViewMode::TwoD,
         };
 
@@ -2417,8 +2412,28 @@ mod tests {
         let loaded = load_persisted_app_state(&storage).expect("state should round-trip");
 
         assert_eq!(loaded.language, Language::Korean);
-        assert_eq!(loaded.curve_output_mode, CurveOutputMode::PreferG2G3AndG5);
+        assert_eq!(loaded.curve_output_mode, CurveOutputMode::LinearSegments);
         assert_eq!(loaded.preview_view_mode, PreviewViewMode::TwoD);
+    }
+
+    #[test]
+    fn legacy_removed_curve_output_modes_fall_back_to_supported_mode() {
+        let mut storage = TestStorage::default();
+        let state = PersistedAppState {
+            language: Language::English,
+            device: DevicePreferences::default(),
+            curve_output_mode: CurveOutputMode::LinearSegments,
+            preview_view_mode: PreviewViewMode::ThreeD,
+        };
+        eframe::set_value(&mut storage, APP_STATE_STORAGE_KEY, &state);
+        let stored = eframe::Storage::get_string(&storage, APP_STATE_STORAGE_KEY)
+            .expect("persisted state should be stored");
+        let removed_mode_state = stored.replace("linear_segments", "removed_curve_mode");
+        eframe::Storage::set_string(&mut storage, APP_STATE_STORAGE_KEY, removed_mode_state);
+
+        let loaded =
+            load_persisted_app_state(&storage).expect("removed legacy curve mode should load");
+        assert_eq!(loaded.curve_output_mode, CurveOutputMode::PreferG2G3);
     }
 
     #[test]

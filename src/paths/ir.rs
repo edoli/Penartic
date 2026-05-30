@@ -349,14 +349,6 @@ impl Segment {
         self.subsegment(start_t, end_t)
     }
 
-    pub fn to_cubic_bezier(&self) -> Option<CubicBezierSegment> {
-        match self {
-            Self::Line(_) => None,
-            Self::Quadratic(segment) => Some(segment.to_cubic()),
-            Self::Cubic(segment) => Some(*segment),
-        }
-    }
-
     pub fn point_at(&self, t: f32) -> Vec2 {
         let t = t.clamp(0.0, 1.0);
         match self {
@@ -501,14 +493,6 @@ pub struct QuadraticBezierSegment {
     pub start: Vec2,
     pub control: Vec2,
     pub end: Vec2,
-}
-
-impl QuadraticBezierSegment {
-    pub fn to_cubic(&self) -> CubicBezierSegment {
-        let control_a = self.start + (self.control - self.start) * (2.0 / 3.0);
-        let control_b = self.end + (self.control - self.end) * (2.0 / 3.0);
-        CubicBezierSegment { start: self.start, control_a, control_b, end: self.end }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -707,21 +691,6 @@ pub fn flatten_stroke_to_polyline(stroke: &Stroke) -> Vec<Vec2> {
 mod tests {
     use super::*;
     use glam::vec2;
-
-    #[test]
-    fn converts_quadratic_to_equivalent_cubic() {
-        let quadratic = QuadraticBezierSegment {
-            start: vec2(0.0, 0.0),
-            control: vec2(3.0, 6.0),
-            end: vec2(9.0, 0.0),
-        };
-
-        let cubic = quadratic.to_cubic();
-        assert_eq!(cubic.start, quadratic.start);
-        assert_eq!(cubic.end, quadratic.end);
-        assert!((cubic.control_a.x - 2.0).abs() < 1e-3);
-        assert!((cubic.control_b.x - 5.0).abs() < 1e-3);
-    }
 
     #[test]
     fn dashes_line_stroke_into_visible_substrokes() {

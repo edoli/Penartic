@@ -1,5 +1,5 @@
 use glam::{Vec2, Vec3};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub const MIN_FILL_SPACING_MM: f32 = 0.1;
 pub const MAX_FILL_SPACING_MM: f32 = 20.0;
@@ -161,32 +161,39 @@ pub enum PrintStartMode {
     DirectFromCurrentPosition,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CurveOutputMode {
     LinearSegments,
     #[default]
     PreferG2G3,
-    PreferG5,
-    PreferG2G3AndG5,
 }
 
 impl CurveOutputMode {
-    pub fn from_flags(prefer_g2g3: bool, prefer_g5: bool) -> Self {
-        match (prefer_g2g3, prefer_g5) {
-            (false, false) => Self::LinearSegments,
-            (true, false) => Self::PreferG2G3,
-            (false, true) => Self::PreferG5,
-            (true, true) => Self::PreferG2G3AndG5,
-        }
-    }
-
     pub fn prefers_g2g3(self) -> bool {
-        matches!(self, Self::PreferG2G3 | Self::PreferG2G3AndG5)
+        matches!(self, Self::PreferG2G3)
     }
+}
 
-    pub fn prefers_g5(self) -> bool {
-        matches!(self, Self::PreferG5 | Self::PreferG2G3AndG5)
+impl<'de> Deserialize<'de> for CurveOutputMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum StoredCurveOutputMode {
+            LinearSegments,
+            PreferG2G3,
+            #[serde(other)]
+            Unsupported,
+        }
+
+        Ok(match StoredCurveOutputMode::deserialize(deserializer)? {
+            StoredCurveOutputMode::LinearSegments => Self::LinearSegments,
+            StoredCurveOutputMode::PreferG2G3 => Self::PreferG2G3,
+            StoredCurveOutputMode::Unsupported => Self::default(),
+        })
     }
 }
 
