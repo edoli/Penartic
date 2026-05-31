@@ -94,6 +94,18 @@ pub struct PreviewOutput {
     pub manipulation: Option<PreviewManipulation>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PreviewInteraction {
+    manipulation: Option<PreviewManipulation>,
+    viewport_interacting: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewQuality {
+    Full,
+    Interactive,
+}
+
 impl ViewportState {
     pub fn with_view_mode(view_mode: PreviewViewMode) -> Self {
         let mut state = Self::default();
@@ -175,12 +187,13 @@ impl ViewportState {
         objects: &[PreviewObjectBounds],
         selected_object_id: Option<u64>,
         mode: ManipulationMode,
-    ) -> Option<PreviewManipulation> {
+    ) -> PreviewInteraction {
         if !ui.input(|input| input.pointer.primary_down()) {
             self.active_object_id = None;
         }
 
         let mut manipulation = None;
+        let mut viewport_interacting = false;
         if response.drag_started_by(egui::PointerButton::Primary)
             || response.clicked_by(egui::PointerButton::Primary)
         {
@@ -245,23 +258,30 @@ impl ViewportState {
                     }
                 }
             }
-            return manipulation;
+            return PreviewInteraction { manipulation, viewport_interacting };
         }
 
         if response.dragged_by(egui::PointerButton::Primary) {
             match self.view_mode {
-                PreviewViewMode::TwoD => self.pan_from_pointer_delta(response, ui, view_projection),
+                PreviewViewMode::TwoD => {
+                    self.pan_from_pointer_delta(response, ui, view_projection);
+                    viewport_interacting = true;
+                }
                 PreviewViewMode::ThreeD => {
                     let drag = response.drag_motion();
                     self.yaw -= drag.x * 0.01;
                     self.pitch = (self.pitch + drag.y * 0.01).clamp(0.2, 1.35);
+                    viewport_interacting = true;
                 }
             }
         }
 
         if response.dragged_by(egui::PointerButton::Secondary) {
             match self.view_mode {
-                PreviewViewMode::TwoD => self.pan_from_pointer_delta(response, ui, view_projection),
+                PreviewViewMode::TwoD => {
+                    self.pan_from_pointer_delta(response, ui, view_projection);
+                    viewport_interacting = true;
+                }
                 PreviewViewMode::ThreeD => {
                     let drag = response.drag_motion();
                     let pan_scale = scene_extent.max(40.0)
@@ -278,19 +298,24 @@ impl ViewportState {
                     let up_on_plane = vec3(camera_up.x, camera_up.y, 0.0).normalize_or_zero();
                     let pan_delta = (-right * drag.x + up_on_plane * drag.y) * pan_scale;
                     *self.pan_mut() += pan_delta.truncate();
+                    viewport_interacting = true;
                 }
             }
         }
 
         if response.hovered() {
-            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+            let (scroll, is_scrolling) =
+                ui.input(|input| (input.smooth_scroll_delta.y, input.is_scrolling()));
             if scroll.abs() > f32::EPSILON {
                 let (min_zoom, max_zoom) = self.zoom_limits();
                 *self.zoom_mut() =
                     (self.zoom() * (1.0 - scroll * 0.0015)).clamp(min_zoom, max_zoom);
+                viewport_interacting = true;
+            } else if is_scrolling {
+                viewport_interacting = true;
             }
         }
-        manipulation
+        PreviewInteraction { manipulation, viewport_interacting }
     }
 }
 
@@ -298,6 +323,8 @@ pub struct PreviewRenderer {
     ready: bool,
     cache: RefCell<Option<PreviewGeometryCache>>,
 }
+
+const INTERACTIVE_TOOLPATH_SEGMENT_BUDGET: usize = 12_000;
 
 impl PreviewRenderer {
     pub fn new(cc: &eframe::CreationContext<'_>, msaa_samples: u32) -> Self {
@@ -429,7 +456,7 @@ impl PreviewRenderer {
             .unwrap_or(220.0);
         let printable_area = plan.map(|plan| plan.printable_area).unwrap_or_default();
         let view_projection = view_projection_for_area(printable_area, rect.size(), state);
-        let manipulation = state.handle_input(
+        let interaction = state.handle_input(
             &response,
             ui,
             scene_extent,
@@ -449,7 +476,7 @@ impl PreviewRenderer {
                 egui::TextStyle::Heading.resolve(ui.style()),
                 colors::error(),
             );
-            return PreviewOutput { rect, view_projection, manipulation };
+            return PreviewOutput { rect, view_projection, manipulation: interaction.manipulation };
         }
 
         let Some(plan) = plan else {
@@ -460,20 +487,29 @@ impl PreviewRenderer {
                 egui::TextStyle::Heading.resolve(ui.style()),
                 colors::muted_text(),
             );
-            return PreviewOutput { rect, view_projection, manipulation };
+            return PreviewOutput { rect, view_projection, manipulation: interaction.manipulation };
         };
 
+        let quality =
+            if state.view_mode() == PreviewViewMode::ThreeD && interaction.viewport_interacting {
+                PreviewQuality::Interactive
+            } else {
+                PreviewQuality::Full
+            };
         let geometry = self.cached_geometry(plan, progress, show_travel_moves, show_drawing_bounds);
 
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
             PreviewPaintCallback {
-                geometry_id: Arc::as_ptr(&geometry) as usize,
+                geometry_id: PreviewRenderGeometryId {
+                    geometry_ptr: Arc::as_ptr(&geometry) as usize,
+                    quality,
+                },
                 geometry,
                 view_projection: CameraUniform::new(view_projection),
             },
         ));
-        PreviewOutput { rect, view_projection, manipulation }
+        PreviewOutput { rect, view_projection, manipulation: interaction.manipulation }
     }
 
     fn cached_geometry(
@@ -520,7 +556,8 @@ impl PreviewRenderer {
 #[derive(Clone)]
 struct PreviewGeometry {
     triangle_vertices: Vec<GpuVertex>,
-    line_vertices: Vec<GpuVertex>,
+    full_line_vertices: Vec<GpuVertex>,
+    interactive_line_vertices: Vec<GpuVertex>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -553,35 +590,70 @@ impl PreviewGeometry {
         show_drawing_bounds: bool,
     ) -> Self {
         let mut triangle_vertices = Vec::new();
-        let mut line_vertices = Vec::new();
+        let mut static_line_vertices = Vec::new();
 
-        append_bed(&mut triangle_vertices, &mut line_vertices, plan);
+        append_bed(&mut triangle_vertices, &mut static_line_vertices, plan);
         if show_drawing_bounds {
             let color = if plan.is_out_of_bounds {
                 colors::preview_overflow()
             } else {
                 colors::preview_bounds()
             };
-            append_drawing_bounds_outline(&mut line_vertices, plan, color);
+            append_drawing_bounds_outline(&mut static_line_vertices, plan, color);
         }
 
         let (finished, partial, pen_position) = plan.progress_state(progress);
-        for segment in plan.segments.iter().take(finished) {
-            append_segment(&mut line_vertices, segment, plan.printable_area, show_travel_moves);
-        }
-        if let Some(partial) = partial {
-            append_segment(&mut line_vertices, &partial, plan.printable_area, show_travel_moves);
-        }
+        let finished_segments = &plan.segments[..finished];
+        let visible_segment_count =
+            visible_segment_count(finished_segments, partial.as_ref(), show_travel_moves);
+        let interactive_stride = interactive_segment_stride(visible_segment_count);
+
+        let mut full_line_vertices = static_line_vertices.clone();
+        append_visible_segments(
+            &mut full_line_vertices,
+            finished_segments,
+            partial.as_ref(),
+            plan.printable_area,
+            show_travel_moves,
+        );
+
+        let interactive_line_vertices = if interactive_stride == 1 {
+            full_line_vertices.clone()
+        } else {
+            let mut interactive_line_vertices = static_line_vertices;
+            append_interactive_segments_with_stride(
+                &mut interactive_line_vertices,
+                finished_segments,
+                partial.as_ref(),
+                plan.printable_area,
+                show_travel_moves,
+                interactive_stride,
+            );
+            interactive_line_vertices
+        };
 
         append_pen(&mut triangle_vertices, pen_position);
 
-        Self { triangle_vertices, line_vertices }
+        Self { triangle_vertices, full_line_vertices, interactive_line_vertices }
     }
+
+    fn line_vertices(&self, quality: PreviewQuality) -> &[GpuVertex] {
+        match quality {
+            PreviewQuality::Full => &self.full_line_vertices,
+            PreviewQuality::Interactive => &self.interactive_line_vertices,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PreviewRenderGeometryId {
+    geometry_ptr: usize,
+    quality: PreviewQuality,
 }
 
 #[derive(Clone)]
 struct PreviewPaintCallback {
-    geometry_id: usize,
+    geometry_id: PreviewRenderGeometryId,
     geometry: Arc<PreviewGeometry>,
     view_projection: CameraUniform,
 }
@@ -623,7 +695,7 @@ struct PreviewRenderResources {
     line_capacity: usize,
     triangle_vertex_count: u32,
     line_vertex_count: u32,
-    geometry_id: Option<usize>,
+    geometry_id: Option<PreviewRenderGeometryId>,
 }
 
 impl PreviewRenderResources {
@@ -632,7 +704,7 @@ impl PreviewRenderResources {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         camera: &CameraUniform,
-        geometry_id: usize,
+        geometry_id: PreviewRenderGeometryId,
         geometry: &PreviewGeometry,
     ) {
         self.update_camera(device, queue, camera);
@@ -643,7 +715,7 @@ impl PreviewRenderResources {
         self.geometry_id = Some(geometry_id);
 
         let triangle_vertices = &geometry.triangle_vertices;
-        let line_vertices = &geometry.line_vertices;
+        let line_vertices = geometry.line_vertices(geometry_id.quality);
         self.triangle_vertex_count = triangle_vertices.len() as u32;
         self.line_vertex_count = line_vertices.len() as u32;
 
@@ -1022,20 +1094,155 @@ fn append_segment(
     segment: &MotionSegment,
     printable_area: PrintableArea,
     show_travel_moves: bool,
-) {
-    if segment.kind == MotionKind::Travel && !show_travel_moves {
-        return;
+) -> bool {
+    if !segment_is_visible(segment, show_travel_moves) {
+        return false;
     }
 
-    let color = if segment_out_of_bounds(segment, printable_area) {
-        colors::preview_overflow()
-    } else {
-        match segment.kind {
-            MotionKind::Travel => colors::preview_travel(),
-            MotionKind::Draw => colors::preview_draw(),
+    let style = PreviewSegmentStyle::from_segment(segment, printable_area);
+    append_line(line_vertices, segment.start, segment.end, style.color());
+    true
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PreviewSegmentStyle {
+    kind: MotionKind,
+    out_of_bounds: bool,
+}
+
+impl PreviewSegmentStyle {
+    fn from_segment(segment: &MotionSegment, printable_area: PrintableArea) -> Self {
+        Self { kind: segment.kind, out_of_bounds: segment_out_of_bounds(segment, printable_area) }
+    }
+
+    fn color(self) -> [f32; 4] {
+        if self.out_of_bounds {
+            colors::preview_overflow()
+        } else {
+            match self.kind {
+                MotionKind::Travel => colors::preview_travel(),
+                MotionKind::Draw => colors::preview_draw(),
+            }
         }
-    };
-    append_line(line_vertices, segment.start, segment.end, color);
+    }
+}
+
+struct InteractiveToolpathBuilder {
+    stride: usize,
+    bucket_style: Option<PreviewSegmentStyle>,
+    bucket_start: Vec3,
+    bucket_end: Vec3,
+    bucket_count: usize,
+}
+
+impl InteractiveToolpathBuilder {
+    fn new(stride: usize) -> Self {
+        Self {
+            stride: stride.max(1),
+            bucket_style: None,
+            bucket_start: Vec3::ZERO,
+            bucket_end: Vec3::ZERO,
+            bucket_count: 0,
+        }
+    }
+
+    fn push(
+        &mut self,
+        line_vertices: &mut Vec<GpuVertex>,
+        segment: &MotionSegment,
+        printable_area: PrintableArea,
+    ) {
+        let style = PreviewSegmentStyle::from_segment(segment, printable_area);
+        if let Some(bucket_style) = self.bucket_style {
+            let contiguous = self.bucket_end.distance_squared(segment.start) <= 1e-6;
+            if bucket_style != style || !contiguous || self.bucket_count >= self.stride {
+                self.flush(line_vertices);
+            }
+        }
+
+        if self.bucket_style.is_none() {
+            self.bucket_style = Some(style);
+            self.bucket_start = segment.start;
+            self.bucket_end = segment.end;
+            self.bucket_count = 1;
+            return;
+        }
+
+        self.bucket_end = segment.end;
+        self.bucket_count += 1;
+    }
+
+    fn finish(&mut self, line_vertices: &mut Vec<GpuVertex>) {
+        self.flush(line_vertices);
+    }
+
+    fn flush(&mut self, line_vertices: &mut Vec<GpuVertex>) {
+        let Some(style) = self.bucket_style.take() else {
+            return;
+        };
+        append_line(line_vertices, self.bucket_start, self.bucket_end, style.color());
+        self.bucket_count = 0;
+    }
+}
+
+fn append_visible_segments(
+    line_vertices: &mut Vec<GpuVertex>,
+    finished_segments: &[MotionSegment],
+    partial: Option<&MotionSegment>,
+    printable_area: PrintableArea,
+    show_travel_moves: bool,
+) {
+    for segment in finished_segments {
+        append_segment(line_vertices, segment, printable_area, show_travel_moves);
+    }
+    if let Some(partial) = partial {
+        append_segment(line_vertices, partial, printable_area, show_travel_moves);
+    }
+}
+
+fn append_interactive_segments_with_stride(
+    line_vertices: &mut Vec<GpuVertex>,
+    finished_segments: &[MotionSegment],
+    partial: Option<&MotionSegment>,
+    printable_area: PrintableArea,
+    show_travel_moves: bool,
+    stride: usize,
+) {
+    let mut builder = InteractiveToolpathBuilder::new(stride);
+    for segment in finished_segments {
+        if segment_is_visible(segment, show_travel_moves) {
+            builder.push(line_vertices, segment, printable_area);
+        }
+    }
+    if let Some(partial) = partial.filter(|segment| segment_is_visible(segment, show_travel_moves))
+    {
+        builder.push(line_vertices, partial, printable_area);
+    }
+    builder.finish(line_vertices);
+}
+
+fn visible_segment_count(
+    finished_segments: &[MotionSegment],
+    partial: Option<&MotionSegment>,
+    show_travel_moves: bool,
+) -> usize {
+    let finished = finished_segments
+        .iter()
+        .filter(|segment| segment_is_visible(segment, show_travel_moves))
+        .count();
+    finished
+        + partial
+            .filter(|segment| segment_is_visible(segment, show_travel_moves))
+            .map(|_| 1)
+            .unwrap_or(0)
+}
+
+fn interactive_segment_stride(visible_segment_count: usize) -> usize {
+    visible_segment_count.div_ceil(INTERACTIVE_TOOLPATH_SEGMENT_BUDGET).max(1)
+}
+
+fn segment_is_visible(segment: &MotionSegment, show_travel_moves: bool) -> bool {
+    show_travel_moves || segment.kind != MotionKind::Travel
 }
 
 fn append_drawing_bounds_outline(
@@ -1120,6 +1327,7 @@ fn point_out_of_bounds(point: Vec3, printable_area: PrintableArea) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plot::model::ToolpathStats;
 
     #[test]
     fn two_d_projection_round_trips_bed_points() {
@@ -1135,5 +1343,105 @@ mod tests {
             screen_to_bed(projected, rect, view_projection).expect("screen point should unproject");
 
         assert!((restored - point).length() < 1e-3);
+    }
+
+    #[test]
+    fn interactive_quality_reduces_dense_toolpaths() {
+        let segment_count = INTERACTIVE_TOOLPATH_SEGMENT_BUDGET + 24;
+        let mut segments = Vec::with_capacity(segment_count);
+        let mut segment_end_times_s = Vec::with_capacity(segment_count);
+
+        for index in 0..segment_count {
+            let start = vec3(index as f32, (index % 2) as f32, 0.0);
+            let end = vec3((index + 1) as f32, ((index + 1) % 2) as f32, 0.0);
+            segments.push(MotionSegment { start, end, kind: MotionKind::Draw, duration_s: 1.0 });
+            segment_end_times_s.push((index + 1) as f32);
+        }
+
+        let last_end = segments.last().expect("expected dense segments").end;
+        let plan = test_plan(PrintableArea::new(16_000.0, 200.0), segments, segment_end_times_s);
+        let geometry = PreviewGeometry::from_plan(&plan, 1.0, false, false);
+
+        assert!(geometry.interactive_line_vertices.len() < geometry.full_line_vertices.len());
+        let last_vertex = geometry
+            .interactive_line_vertices
+            .last()
+            .expect("expected an interactive toolpath line");
+        assert_eq!(last_vertex.position, last_end.to_array());
+    }
+
+    #[test]
+    fn interactive_quality_keeps_overflow_style_boundaries() {
+        let printable_area = PrintableArea::new(20.0, 20.0);
+        let segments = vec![
+            MotionSegment {
+                start: vec3(1.0, 1.0, 0.0),
+                end: vec3(2.0, 1.0, 0.0),
+                kind: MotionKind::Draw,
+                duration_s: 1.0,
+            },
+            MotionSegment {
+                start: vec3(2.0, 1.0, 0.0),
+                end: vec3(25.0, 1.0, 0.0),
+                kind: MotionKind::Draw,
+                duration_s: 1.0,
+            },
+            MotionSegment {
+                start: vec3(25.0, 1.0, 0.0),
+                end: vec3(15.0, 1.0, 0.0),
+                kind: MotionKind::Draw,
+                duration_s: 1.0,
+            },
+            MotionSegment {
+                start: vec3(15.0, 1.0, 0.0),
+                end: vec3(16.0, 1.0, 0.0),
+                kind: MotionKind::Draw,
+                duration_s: 1.0,
+            },
+        ];
+
+        let mut line_vertices = Vec::new();
+        append_interactive_segments_with_stride(
+            &mut line_vertices,
+            &segments,
+            None,
+            printable_area,
+            false,
+            8,
+        );
+
+        assert_eq!(line_vertices.len(), 6);
+        assert_eq!(line_vertices[0].color, colors::preview_draw());
+        assert_eq!(line_vertices[2].color, colors::preview_overflow());
+        assert_eq!(line_vertices[4].color, colors::preview_draw());
+    }
+
+    fn test_plan(
+        printable_area: PrintableArea,
+        segments: Vec<MotionSegment>,
+        segment_end_times_s: Vec<f32>,
+    ) -> ToolpathPlan {
+        ToolpathPlan {
+            source_name: "test".into(),
+            printable_area,
+            drawing_origin: Vec2::ZERO,
+            drawing_bounds: Vec2::new(printable_area.width_mm, printable_area.height_mm),
+            first_draw_point: segments
+                .iter()
+                .find(|segment| segment.kind == MotionKind::Draw)
+                .map(|segment| segment.start.truncate()),
+            is_out_of_bounds: false,
+            stats: ToolpathStats {
+                drawing_distance_mm: 0.0,
+                travel_distance_mm: 0.0,
+                stroke_count: 1,
+                segment_count: segments.len(),
+                estimated_duration_s: segment_end_times_s.last().copied().unwrap_or(0.0),
+            },
+            segments,
+            segment_end_times_s,
+            gcode_lines: Vec::new(),
+            warnings: Vec::new(),
+        }
     }
 }

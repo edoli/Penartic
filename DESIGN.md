@@ -89,8 +89,9 @@ window. The callback draws:
 - left drag rotates the camera in 3D unless it starts on a selectable SVG object; in 2D, background left drag pans instead; object drags manipulate the selected object according to the top toolbar mode, and right drag continues to pan
 - preview vertex buffers may grow when printable area or toolpath density changes and therefore must be resized safely before queue writes
 - preview geometry is cached in world coordinates and transformed in the preview shader with a
-  per-frame camera uniform, so switching between 2D/3D, panning, rotating, or zooming complex SVGs does not rebuild or re-upload
-  the full toolpath vertex buffer
+  per-frame camera uniform; dense toolpaths also precompute a reduced-detail interaction line set
+  so active 3D orbit/pan/zoom can swap to the lighter buffer and then restore full detail
+  immediately when the camera input ends
 
 ### 4.3 WGPU/MSAA rule
 
