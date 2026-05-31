@@ -32,6 +32,7 @@ const MIN_POLYLINE_ARC_POINTS: usize = 4;
 const MIN_POLYLINE_ARC_POINT_ADVANTAGE: usize = 2;
 const MAX_POLYLINE_FIT_LOOKAHEAD_POINTS: usize = 128;
 const PRINTABLE_AREA_EPSILON_MM: f32 = 0.01;
+const MIN_EXPLICIT_CUTTER_SWIVEL_TURN_DEGREES: f32 = 10.0;
 
 #[derive(Debug, Clone, Copy)]
 enum DrawPrimitive {
@@ -889,6 +890,11 @@ fn append_corner_swivel_primitive(
 
     let turn_cross = cross_2d(incoming_tangent, outgoing_tangent);
     if turn_cross.abs() <= CORNER_EPSILON {
+        append_line_primitive(primitives, start, end);
+        return;
+    }
+    let turn_angle = incoming_tangent.dot(outgoing_tangent).clamp(-1.0, 1.0).acos();
+    if turn_angle < MIN_EXPLICIT_CUTTER_SWIVEL_TURN_DEGREES.to_radians() {
         append_line_primitive(primitives, start, end);
         return;
     }
@@ -1895,6 +1901,21 @@ mod tests {
         }
     }
 
+    fn sample_drag_knife_settings(curve_output_mode: CurveOutputMode) -> ToolSettings {
+        ToolSettings {
+            printable_area: PrintableArea::new(800.0, 600.0),
+            print_speed_mm_s: 25.0,
+            lift_height_mm: 2.0,
+            print_start_mode: PrintStartMode::DirectFromCurrentPosition,
+            curve_output_mode,
+            tool_mode: ToolMode::SilhouetteCutter,
+            blade_offset_mm: 0.25,
+            overcut_mm: 0.0,
+            corner_swivel_enabled: true,
+            ..ToolSettings::default()
+        }
+    }
+
     fn sample_prepared_svg(source_name: &str) -> PreparedSvg {
         let printable_area = PrintableArea::new(800.0, 600.0);
         let parsed = parse_svg_with_language(
@@ -1915,10 +1936,12 @@ mod tests {
         sample_plan("sample_curve.svg", curve_output_mode)
     }
 
-    fn sample_arc_optimization_metrics(source_name: &str) -> SampleArcOptimizationMetrics {
+    fn sample_arc_optimization_metrics_with_settings(
+        source_name: &str,
+        linear_settings: ToolSettings,
+        optimized_settings: ToolSettings,
+    ) -> SampleArcOptimizationMetrics {
         let prepared = sample_prepared_svg(source_name);
-        let linear_settings = sample_tool_settings(CurveOutputMode::LinearSegments);
-        let optimized_settings = sample_tool_settings(CurveOutputMode::PreferG2G3);
 
         let mut max_deviation_mm: f32 = 0.0;
         let mut total_distance_mm = 0.0;
@@ -1951,6 +1974,22 @@ mod tests {
             optimized_g2,
             optimized_g3,
         }
+    }
+
+    fn sample_arc_optimization_metrics(source_name: &str) -> SampleArcOptimizationMetrics {
+        sample_arc_optimization_metrics_with_settings(
+            source_name,
+            sample_tool_settings(CurveOutputMode::LinearSegments),
+            sample_tool_settings(CurveOutputMode::PreferG2G3),
+        )
+    }
+
+    fn sample_cutter_arc_optimization_metrics(source_name: &str) -> SampleArcOptimizationMetrics {
+        sample_arc_optimization_metrics_with_settings(
+            source_name,
+            sample_drag_knife_settings(CurveOutputMode::LinearSegments),
+            sample_drag_knife_settings(CurveOutputMode::PreferG2G3),
+        )
     }
 
     fn symmetric_deviation_between_primitives(
@@ -2219,6 +2258,41 @@ mod tests {
     }
 
     #[test]
+    fn sample_letters_cutter_arc_optimization_reduces_command_count_with_small_deviation() {
+        let metrics = sample_cutter_arc_optimization_metrics("sample_letters.svg");
+        let optimized_total = metrics.optimized_g1 + metrics.optimized_g2 + metrics.optimized_g3;
+
+        assert!(
+            metrics.optimized_g2 + metrics.optimized_g3 > 0,
+            "sample_letters cutter mode should emit G2/G3 (optimized_g1 {}, optimized_g2 {}, optimized_g3 {})",
+            metrics.optimized_g1,
+            metrics.optimized_g2,
+            metrics.optimized_g3,
+        );
+        assert!(
+            optimized_total < metrics.linear_g1,
+            "sample_letters cutter mode should reduce command count (linear G1 {}, optimized total {}, optimized_g1 {}, optimized_g2 {}, optimized_g3 {})",
+            metrics.linear_g1,
+            optimized_total,
+            metrics.optimized_g1,
+            metrics.optimized_g2,
+            metrics.optimized_g3,
+        );
+        assert!(
+            metrics.max_deviation_mm <= MAX_SAMPLE_ARC_DEVIATION_MM,
+            "sample_letters cutter mode max deviation {:.3}mm exceeded {:.3}mm",
+            metrics.max_deviation_mm,
+            MAX_SAMPLE_ARC_DEVIATION_MM,
+        );
+        assert!(
+            metrics.mean_deviation_mm <= MEAN_SAMPLE_ARC_DEVIATION_MM,
+            "sample_letters cutter mode mean deviation {:.3}mm exceeded {:.3}mm",
+            metrics.mean_deviation_mm,
+            MEAN_SAMPLE_ARC_DEVIATION_MM,
+        );
+    }
+
+    #[test]
     fn emits_g3_for_smoothed_right_angle_when_arc_mode_enabled() {
         let plan = build_plan(
             right_angle_prepared_svg(),
@@ -2307,6 +2381,15 @@ mod tests {
         assert!(plan.gcode_lines.iter().any(|line| line == "G3 X10.00 Y1.00 I-1.000 J0.000"));
         assert!(plan.gcode_lines.iter().any(|line| line == "G1 X11.00 Y0.00 F1500"));
         assert!(plan.gcode_lines.iter().any(|line| line == "G1 X10.00 Y11.00"));
+    }
+
+    #[test]
+    fn silhouette_cutter_keeps_sharp_corner_swivel_at_default_blade_offset() {
+        let mut settings = drag_knife_settings(CurveOutputMode::PreferG2G3);
+        settings.blade_offset_mm = 0.25;
+        let plan = build_plan(right_angle_prepared_svg(), &settings);
+
+        assert!(plan.gcode_lines.iter().any(|line| line.starts_with("G3 ")));
     }
 
     #[test]
