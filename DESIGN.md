@@ -92,6 +92,8 @@ window. The callback draws:
   per-frame camera uniform; dense toolpaths also precompute a reduced-detail interaction line set
   so active 3D orbit/pan/zoom can swap to the lighter buffer and then restore full detail
   immediately when the camera input ends
+- preview vertices pack color into normalized 8-bit channels so the GPU line/triangle buffers stay
+  compact even for dense SVGs, reducing upload and draw bandwidth without changing preview colors
 
 ### 4.3 WGPU/MSAA rule
 

@@ -363,7 +363,7 @@ impl PreviewRenderer {
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GpuVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4],
         };
 
         let triangle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -825,7 +825,7 @@ fn update_buffer(
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuVertex {
     position: [f32; 3],
-    color: [f32; 4],
+    color: [u8; 4],
 }
 
 #[repr(C)]
@@ -1302,11 +1302,13 @@ fn append_pen(triangle_vertices: &mut Vec<GpuVertex>, tip: Vec3) {
 }
 
 fn append_line(vertices: &mut Vec<GpuVertex>, start: Vec3, end: Vec3, color: [f32; 4]) {
+    let color = pack_color(color);
     vertices.push(GpuVertex { position: start.to_array(), color });
     vertices.push(GpuVertex { position: end.to_array(), color });
 }
 
 fn append_triangle(vertices: &mut Vec<GpuVertex>, a: Vec3, b: Vec3, c: Vec3, color: [f32; 4]) {
+    let color = pack_color(color);
     vertices.push(GpuVertex { position: a.to_array(), color });
     vertices.push(GpuVertex { position: b.to_array(), color });
     vertices.push(GpuVertex { position: c.to_array(), color });
@@ -1322,6 +1324,10 @@ fn point_out_of_bounds(point: Vec3, printable_area: PrintableArea) -> bool {
         || point.y < -0.01
         || point.x > printable_area.width_mm + 0.01
         || point.y > printable_area.height_mm + 0.01
+}
+
+fn pack_color(color: [f32; 4]) -> [u8; 4] {
+    color.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
 #[cfg(test)]
@@ -1411,9 +1417,14 @@ mod tests {
         );
 
         assert_eq!(line_vertices.len(), 6);
-        assert_eq!(line_vertices[0].color, colors::preview_draw());
-        assert_eq!(line_vertices[2].color, colors::preview_overflow());
-        assert_eq!(line_vertices[4].color, colors::preview_draw());
+        assert_eq!(line_vertices[0].color, pack_color(colors::preview_draw()));
+        assert_eq!(line_vertices[2].color, pack_color(colors::preview_overflow()));
+        assert_eq!(line_vertices[4].color, pack_color(colors::preview_draw()));
+    }
+
+    #[test]
+    fn preview_vertices_stay_compact() {
+        assert_eq!(std::mem::size_of::<GpuVertex>(), 16);
     }
 
     fn test_plan(
