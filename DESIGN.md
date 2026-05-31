@@ -60,7 +60,7 @@ The product must remain useful even when no device is connected:
 | `src/platform/device/mod.rs` | Transport-agnostic device controller state, connection preferences, worker dispatch, shared parsing/helpers, and device-facing app API |
 | `src/platform/device/serial.rs` | Native serial and web-serial workers, ACK-driven streaming, and serial-specific probing |
 | `src/platform/device/esp3d.rs` | Native/web ESP3D WebSocket or HTTP workers, queue management, and ESP3D endpoint normalization |
-| `src/platform/device/octoprint.rs` | Native OctoPrint REST worker, printer/profile probing, command dispatch, job upload/start/cancel, and OctoPrint-specific state handling |
+| `src/platform/device/octoprint.rs` | Native and web OctoPrint REST workers, printer/profile probing, command dispatch, job upload/start/cancel, and OctoPrint-specific state handling |
 | `src/platform/crash.rs` | Native panic hook and runtime error log persistence |
 | `src/validation.rs` | Native UI screenshot validation wrapper that captures the egui viewport after a delay |
 | `src/res/colors.rs` | Shared UI and preview color tokens |
@@ -123,11 +123,12 @@ updated with the same value to avoid WGPU validation errors.
   subprotocol and endpoint normalization, but browsers block mixed-content `ws://` connections from
   an `https://` page, so hosted web builds require a `wss://` endpoint unless the app is served
   locally over `http://`/`localhost`
-- native builds can also connect to OctoPrint with a base URL and API key; the worker verifies the server,
+- native and web builds can connect to OctoPrint with a base URL and API key; the worker verifies the server,
   reads the current printer profile for printable area when available, sends manual G-code through
   `/api/printer/command`, uploads generated jobs to `/api/files/local`, starts the uploaded file as a print,
   polls `/api/printer` and `/api/job` for readiness/progress, and cancels through `POST /api/job`
-- OctoPrint is intentionally native-only for now; web builds expose the selector only for supported methods
+- web OctoPrint access uses browser `fetch`, so the target server must allow the app origin with CORS and hosted
+  `https://` builds cannot talk to `http://` OctoPrint instances because browsers block mixed content
 - the device controller keeps the app usable when no port is available
 - firmware/build-volume probing is intentionally best-effort because printer responses vary by firmware
 - native serial connection probing sends `M115`, `M503`, and `M211`; native ESP3D probing sends the
@@ -198,7 +199,7 @@ Current non-goals:
 | G-code copy/export flow | Yes | Yes |
 | Serial device connection | Yes | Yes, through Web Serial |
 | ESP3D device connection | Yes | Yes |
-| OctoPrint device connection | Yes | No |
+| OctoPrint device connection | Yes | Yes, with browser CORS and mixed-content limits |
 | Firmware probing | Yes | Yes, best-effort through Web Serial |
 | Local CJK font scanning | Yes | No, uses bundled CJK font |
 | Crash log files | Yes | No |
@@ -207,7 +208,7 @@ Current non-goals:
 
 - formatting: `cargo fmt`
 - native validation: `cargo build`, `cargo test`
-- web validation: `cargo build --target wasm32-unknown-unknown`, plus `trunk build --release` when changing browser-only integration such as Web Serial or ESP3D workers
+- web validation: `cargo build --target wasm32-unknown-unknown`, plus `trunk build --release` when changing browser-only integration such as Web Serial, ESP3D, or OctoPrint workers
 - SVG regression validation: load every file under `sample\*.svg` through the test suite
 - native visual validation: run `cargo run --bin ui_screenshot_validation -- --svg sample\sample_curve.svg --out target\validation\ui-validation.png --delay-seconds 2`, then inspect the generated screenshot for obvious layout or rendering anomalies
 - GitHub Pages deployment: pushes to `main` run `.github/workflows/deploy-pages.yml`, validate sample SVG loading, build the Trunk web bundle with a repository-relative public URL, and deploy the `dist` artifact through GitHub Pages Actions; browser-only device code must therefore stay compiling on the `wasm32-unknown-unknown` target even when the native device transports are refactored

@@ -1,5 +1,4 @@
 mod esp3d;
-#[cfg(not(target_arch = "wasm32"))]
 mod octoprint;
 mod serial;
 
@@ -56,15 +55,7 @@ pub enum ConnectionMethod {
 
 impl ConnectionMethod {
     pub fn available() -> &'static [Self] {
-        #[cfg(target_arch = "wasm32")]
-        {
-            &[Self::Serial, Self::Esp3d]
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            &[Self::Serial, Self::Esp3d, Self::OctoPrint]
-        }
+        &[Self::Serial, Self::Esp3d, Self::OctoPrint]
     }
 
     pub fn label(self, language: Language) -> &'static str {
@@ -363,7 +354,9 @@ impl DeviceController {
             match self.preferences.connection_method {
                 ConnectionMethod::Serial => web_serial_api().is_some(),
                 ConnectionMethod::Esp3d => !self.preferences.esp3d_endpoint.trim().is_empty(),
-                ConnectionMethod::OctoPrint => false,
+                ConnectionMethod::OctoPrint => {
+                    !self.preferences.octoprint_base_url.trim().is_empty()
+                }
             }
         }
 
@@ -396,9 +389,10 @@ impl DeviceController {
                 ConnectionMethod::Esp3d => WebConnectionTarget::Esp3d {
                     endpoint: self.preferences.esp3d_endpoint.trim().to_owned(),
                 },
-                ConnectionMethod::OctoPrint => {
-                    return Err(self.text().octoprint_unavailable_in_web.to_owned());
-                }
+                ConnectionMethod::OctoPrint => WebConnectionTarget::OctoPrint {
+                    base_url: self.preferences.octoprint_base_url.trim().to_owned(),
+                    api_key: self.preferences.octoprint_api_key.trim().to_owned(),
+                },
             };
             let target_label = target.target_label(self.language);
 
@@ -412,13 +406,19 @@ impl DeviceController {
             self.firmware_summary = None;
             self.detected_area = None;
             self.connected_target_label = Some(target_label.clone());
-            if self.preferences.connection_method == ConnectionMethod::Esp3d {
-                self.push_log(self.text().trying_to_connect(&target_label));
-                if let Some(worker) = self.worker.as_ref() {
-                    worker.queue_command(WorkerCommand::QueueManual(initial_probe_commands()));
+            match self.preferences.connection_method {
+                ConnectionMethod::Serial => {
+                    self.push_log(self.text().opening_browser_port_picker.to_owned());
                 }
-            } else {
-                self.push_log(self.text().opening_browser_port_picker.to_owned());
+                ConnectionMethod::Esp3d => {
+                    self.push_log(self.text().trying_to_connect(&target_label));
+                    if let Some(worker) = self.worker.as_ref() {
+                        worker.queue_command(WorkerCommand::QueueManual(initial_probe_commands()));
+                    }
+                }
+                ConnectionMethod::OctoPrint => {
+                    self.push_log(self.text().trying_to_connect(&target_label));
+                }
             }
             Ok(())
         }
@@ -867,6 +867,7 @@ impl NativeConnectionTarget {
 enum WebConnectionTarget {
     Serial,
     Esp3d { endpoint: String },
+    OctoPrint { base_url: String, api_key: String },
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -875,6 +876,7 @@ impl WebConnectionTarget {
         match self {
             Self::Serial => web_serial_device_label(language).to_owned(),
             Self::Esp3d { endpoint } => endpoint.trim().to_owned(),
+            Self::OctoPrint { base_url, .. } => base_url.trim().to_owned(),
         }
     }
 }
@@ -1111,20 +1113,6 @@ fn relabel_port_entry(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn relabel_esp3d_target_entry(entry: &mut Option<String>, previous: Language, next: Language) {
-    let Some(value) = entry.as_mut() else {
-        return;
-    };
-    let previous_prefix = format!("{}: ", previous.strings().esp3d_device);
-    let next_prefix = format!("{}: ", next.strings().esp3d_device);
-    if value.starts_with(&previous_prefix) {
-        *value = format!("{next_prefix}{}", &value[previous_prefix.len()..]);
-    } else if value.starts_with(&next_prefix) {
-        *value = format!("{next_prefix}{}", &value[next_prefix.len()..]);
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
 fn relabel_port_value(
     value: &mut String,
     previous: Language,
@@ -1278,10 +1266,6 @@ impl WebEventQueue {
     fn pop(&self) -> Option<WorkerEvent> {
         self.0.borrow_mut().pop_front()
     }
-
-    fn drain(&self) -> Vec<WorkerEvent> {
-        self.0.borrow_mut().drain(..).collect()
-    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1326,20 +1310,21 @@ impl WebWorker {
                     language,
                 ));
             }
+            WebConnectionTarget::OctoPrint { base_url, api_key } => {
+                spawn_local(octoprint::run_web_worker(
+                    commands.clone(),
+                    events.clone(),
+                    base_url,
+                    api_key,
+                    language,
+                ));
+            }
         }
         Self { commands, events }
     }
 
     fn queue_command(&self, command: WorkerCommand) {
         self.commands.push(command);
-    }
-
-    fn drain_events(&self) -> Vec<WorkerEvent> {
-        self.events.drain()
-    }
-
-    fn send(&self, command: WorkerCommand) {
-        self.queue_command(command);
     }
 
     fn next_event(&self) -> Option<WorkerEvent> {
@@ -1452,6 +1437,11 @@ mod tests {
             "  ".to_owned(),
         ]);
         assert_eq!(lines, vec!["G1 X1"]);
+    }
+
+    #[test]
+    fn connection_methods_include_octoprint() {
+        assert!(ConnectionMethod::available().contains(&ConnectionMethod::OctoPrint));
     }
 
     #[test]
