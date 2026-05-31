@@ -78,6 +78,32 @@ fn default_fill_angle_degrees() -> f32 {
     45.0
 }
 
+fn default_blade_offset_mm() -> f32 {
+    0.25
+}
+
+fn default_overcut_mm() -> f32 {
+    0.0
+}
+
+fn default_corner_swivel_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolMode {
+    #[default]
+    PenPlotter,
+    SilhouetteCutter,
+}
+
+impl ToolMode {
+    pub fn is_silhouette_cutter(self) -> bool {
+        matches!(self, Self::SilhouetteCutter)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSettings {
     pub printable_area: PrintableArea,
@@ -87,6 +113,14 @@ pub struct ToolSettings {
     pub print_start_mode: PrintStartMode,
     #[serde(default)]
     pub curve_output_mode: CurveOutputMode,
+    #[serde(default)]
+    pub tool_mode: ToolMode,
+    #[serde(default = "default_blade_offset_mm")]
+    pub blade_offset_mm: f32,
+    #[serde(default = "default_overcut_mm")]
+    pub overcut_mm: f32,
+    #[serde(default = "default_corner_swivel_enabled")]
+    pub corner_swivel_enabled: bool,
     #[serde(default = "default_corner_smoothing_enabled")]
     pub corner_smoothing_enabled: bool,
     #[serde(default = "default_corner_smoothing_radius_mm")]
@@ -109,6 +143,8 @@ impl ToolSettings {
             PrintableArea::new(self.printable_area.width_mm, self.printable_area.height_mm);
         self.print_speed_mm_s = self.print_speed_mm_s.clamp(1.0, 500.0);
         self.lift_height_mm = self.lift_height_mm.clamp(0.1, 25.0);
+        self.blade_offset_mm = self.blade_offset_mm.clamp(0.0, 10.0);
+        self.overcut_mm = self.overcut_mm.clamp(0.0, 20.0);
         self.corner_smoothing_radius_mm = self.corner_smoothing_radius_mm.clamp(0.1, 10.0);
         self.corner_smoothing_angle_deg = self.corner_smoothing_angle_deg.clamp(5.0, 170.0);
         self.fill_spacing_mm = self.fill_spacing_mm.clamp(MIN_FILL_SPACING_MM, MAX_FILL_SPACING_MM);
@@ -132,6 +168,10 @@ impl Default for ToolSettings {
             lift_height_mm: 1.0,
             print_start_mode: PrintStartMode::default(),
             curve_output_mode: CurveOutputMode::default(),
+            tool_mode: ToolMode::default(),
+            blade_offset_mm: default_blade_offset_mm(),
+            overcut_mm: default_overcut_mm(),
+            corner_swivel_enabled: default_corner_swivel_enabled(),
             corner_smoothing_enabled: default_corner_smoothing_enabled(),
             corner_smoothing_radius_mm: default_corner_smoothing_radius_mm(),
             corner_smoothing_angle_deg: default_corner_smoothing_angle_deg(),

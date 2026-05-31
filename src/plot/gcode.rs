@@ -31,6 +31,7 @@ const POLYLINE_FIT_SWEEP_TOLERANCE_RAD: f32 = 0.05;
 const MIN_POLYLINE_ARC_POINTS: usize = 4;
 const MIN_POLYLINE_ARC_POINT_ADVANTAGE: usize = 2;
 const MAX_POLYLINE_FIT_LOOKAHEAD_POINTS: usize = 128;
+const PRINTABLE_AREA_EPSILON_MM: f32 = 0.01;
 
 #[derive(Debug, Clone, Copy)]
 enum DrawPrimitive {
@@ -221,7 +222,7 @@ pub fn build_plan_with_language(
     } = prepared;
 
     let mut drawable_strokes = Vec::new();
-    if settings.fill_enabled {
+    if settings.fill_enabled && !settings.tool_mode.is_silhouette_cutter() {
         for region in &fill_regions {
             drawable_strokes.extend(generate_fill_strokes(region, settings));
         }
@@ -345,6 +346,10 @@ pub fn build_plan_with_language(
     if settings.curve_output_mode.prefers_g2g3() && has_arc_primitives {
         warnings.push(text.g2g3_firmware_warning.to_owned());
     }
+    let actual_motion_out_of_bounds = segments
+        .iter()
+        .copied()
+        .any(|segment| motion_segment_is_out_of_bounds(segment, settings.printable_area));
 
     ToolpathPlan {
         source_name,
@@ -352,7 +357,7 @@ pub fn build_plan_with_language(
         drawing_origin,
         drawing_bounds,
         first_draw_point,
-        is_out_of_bounds,
+        is_out_of_bounds: is_out_of_bounds || actual_motion_out_of_bounds,
         segments,
         segment_end_times_s,
         gcode_lines,
@@ -723,8 +728,25 @@ fn fill_rule_inside(rule: FillRule, winding: i32) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PolylineSegmentInfo {
+    start: Vec2,
+    end: Vec2,
+    tangent: Vec2,
+}
+
 fn build_draw_primitives(stroke: &Stroke, settings: &ToolSettings) -> Vec<DrawPrimitive> {
-    let base_primitives = stroke
+    let base_primitives = build_base_primitives(stroke);
+    if settings.tool_mode.is_silhouette_cutter() {
+        return build_cutter_primitives(base_primitives, settings);
+    }
+
+    let smoothed = apply_corner_smoothing(base_primitives, settings);
+    optimize_primitives_for_curve_output(smoothed, settings.curve_output_mode)
+}
+
+fn build_base_primitives(stroke: &Stroke) -> Vec<DrawPrimitive> {
+    stroke
         .segments
         .iter()
         .copied()
@@ -732,10 +754,149 @@ fn build_draw_primitives(stroke: &Stroke, settings: &ToolSettings) -> Vec<DrawPr
         .filter(|primitive| {
             primitive_is_finite(*primitive) && primitive.approximate_length() > CORNER_EPSILON
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
 
-    let smoothed = apply_corner_smoothing(base_primitives, settings);
-    optimize_primitives_for_curve_output(smoothed, settings.curve_output_mode)
+fn build_cutter_primitives(
+    base_primitives: Vec<DrawPrimitive>,
+    settings: &ToolSettings,
+) -> Vec<DrawPrimitive> {
+    if base_primitives.is_empty() {
+        return Vec::new();
+    }
+
+    let blade_offset = settings.blade_offset_mm.max(0.0);
+    let overcut = settings.overcut_mm.max(0.0);
+    if blade_offset <= CORNER_EPSILON && overcut <= CORNER_EPSILON {
+        return optimize_primitives_for_curve_output(base_primitives, settings.curve_output_mode);
+    }
+
+    let mut polyline = Vec::new();
+    for primitive in base_primitives {
+        append_polyline_points(&mut polyline, &primitive.flatten_points());
+    }
+
+    let mut polyline = dedupe_consecutive_polyline_points(polyline);
+    if polyline.len() < 2 {
+        return Vec::new();
+    }
+
+    let closed = polyline.len() > 2 && points_match(polyline[0], *polyline.last().unwrap());
+    if closed {
+        polyline.pop();
+    }
+    if polyline.len() < 2 {
+        return Vec::new();
+    }
+
+    let segments = compensated_polyline_segments(&polyline, closed);
+    if segments.is_empty() {
+        return Vec::new();
+    }
+
+    let mut compensated = Vec::new();
+    let first_segment = segments[0];
+    append_line_primitive(
+        &mut compensated,
+        first_segment.start,
+        first_segment.start + first_segment.tangent * blade_offset,
+    );
+
+    for index in 0..segments.len() {
+        let segment = segments[index];
+        let offset_start = segment.start + segment.tangent * blade_offset;
+        let offset_end = segment.end + segment.tangent * blade_offset;
+        append_line_primitive(&mut compensated, offset_start, offset_end);
+
+        let has_next = closed || index + 1 < segments.len();
+        if !has_next {
+            continue;
+        }
+
+        let next = segments[(index + 1) % segments.len()];
+        if settings.corner_swivel_enabled && blade_offset > CORNER_EPSILON {
+            append_corner_swivel_primitive(
+                &mut compensated,
+                segment.end,
+                segment.tangent,
+                next.tangent,
+                blade_offset,
+            );
+        } else {
+            append_line_primitive(
+                &mut compensated,
+                offset_end,
+                next.start + next.tangent * blade_offset,
+            );
+        }
+    }
+
+    if overcut > CORNER_EPSILON {
+        let overcut_direction =
+            if closed { segments[0].tangent } else { segments.last().unwrap().tangent };
+        let overcut_start = if closed {
+            segments[0].start + overcut_direction * blade_offset
+        } else {
+            let last = segments.last().unwrap();
+            last.end + overcut_direction * blade_offset
+        };
+        append_line_primitive(
+            &mut compensated,
+            overcut_start,
+            overcut_start + overcut_direction * overcut,
+        );
+    }
+
+    optimize_primitives_for_curve_output(compensated, settings.curve_output_mode)
+}
+
+fn compensated_polyline_segments(points: &[Vec2], closed: bool) -> Vec<PolylineSegmentInfo> {
+    let mut segments = Vec::new();
+    let segment_count = if closed { points.len() } else { points.len().saturating_sub(1) };
+
+    for index in 0..segment_count {
+        let start = points[index];
+        let end = if closed { points[(index + 1) % points.len()] } else { points[index + 1] };
+        let delta = end - start;
+        if delta.length_squared() <= CORNER_EPSILON.powi(2) {
+            continue;
+        }
+        segments.push(PolylineSegmentInfo { start, end, tangent: delta.normalize() });
+    }
+
+    segments
+}
+
+fn append_line_primitive(primitives: &mut Vec<DrawPrimitive>, start: Vec2, end: Vec2) {
+    if points_match(start, end) {
+        return;
+    }
+    primitives.push(DrawPrimitive::Path(Segment::line(start, end)));
+}
+
+fn append_corner_swivel_primitive(
+    primitives: &mut Vec<DrawPrimitive>,
+    corner: Vec2,
+    incoming_tangent: Vec2,
+    outgoing_tangent: Vec2,
+    blade_offset: f32,
+) {
+    let start = corner + incoming_tangent * blade_offset;
+    let end = corner + outgoing_tangent * blade_offset;
+    if points_match(start, end) {
+        return;
+    }
+
+    let turn_cross = cross_2d(incoming_tangent, outgoing_tangent);
+    if turn_cross.abs() <= CORNER_EPSILON {
+        append_line_primitive(primitives, start, end);
+        return;
+    }
+
+    let arc = ArcSegment { start, end, center: corner, clockwise: turn_cross < 0.0 };
+    if primitive_is_finite(DrawPrimitive::Arc(arc)) && arc.approximate_length() > CORNER_EPSILON {
+        primitives.push(DrawPrimitive::Arc(arc));
+    }
 }
 
 fn optimize_primitives_for_curve_output(
@@ -1555,13 +1716,30 @@ fn push_segment(
     segment_end_times_s.push(cumulative_s);
 }
 
+fn motion_segment_is_out_of_bounds(
+    segment: MotionSegment,
+    printable_area: crate::plot::model::PrintableArea,
+) -> bool {
+    xy_is_out_of_bounds(segment.start.truncate(), printable_area)
+        || xy_is_out_of_bounds(segment.end.truncate(), printable_area)
+}
+
+fn xy_is_out_of_bounds(point: Vec2, printable_area: crate::plot::model::PrintableArea) -> bool {
+    point.x < -PRINTABLE_AREA_EPSILON_MM
+        || point.y < -PRINTABLE_AREA_EPSILON_MM
+        || point.x > printable_area.width_mm + PRINTABLE_AREA_EPSILON_MM
+        || point.y > printable_area.height_mm + PRINTABLE_AREA_EPSILON_MM
+}
+
 #[cfg(test)]
 mod tests {
     use glam::vec2;
 
     use super::*;
     use crate::paths::{FillRegion, FillRule, parse_svg_with_language, prepare_svg};
-    use crate::plot::model::{CurveOutputMode, PrintStartMode, PrintableArea, ToolSettings};
+    use crate::plot::model::{
+        CurveOutputMode, PrintStartMode, PrintableArea, ToolMode, ToolSettings,
+    };
 
     const ARC_COMPARISON_SAMPLE_STEP_MM: f32 = 0.2;
     const MAX_SAMPLE_ARC_DEVIATION_MM: f32 = 0.15;
@@ -1641,6 +1819,21 @@ mod tests {
             fill_pattern,
             fill_spacing_mm: 0.6,
             fill_angle_degrees: 0.0,
+            ..ToolSettings::default()
+        }
+    }
+
+    fn drag_knife_settings(curve_output_mode: CurveOutputMode) -> ToolSettings {
+        ToolSettings {
+            printable_area: PrintableArea::new(100.0, 100.0),
+            print_speed_mm_s: 25.0,
+            lift_height_mm: 2.0,
+            print_start_mode: PrintStartMode::DirectFromCurrentPosition,
+            curve_output_mode,
+            tool_mode: ToolMode::SilhouetteCutter,
+            blade_offset_mm: 1.0,
+            overcut_mm: 0.0,
+            corner_swivel_enabled: true,
             ..ToolSettings::default()
         }
     }
@@ -2079,6 +2272,105 @@ mod tests {
         assert!(!points_match(smoothed_primitives[0].end_point(), vec2(10.0, 10.0)));
         assert!(!points_match(smoothed_primitives[1].start_point(), vec2(10.0, 10.0)));
         assert!(!points_match(smoothed_primitives[1].end_point(), vec2(10.0, 10.0)));
+    }
+
+    #[test]
+    fn silhouette_cutter_adds_alignment_move_and_overcut_for_open_strokes() {
+        let mut settings = drag_knife_settings(CurveOutputMode::LinearSegments);
+        settings.overcut_mm = 0.5;
+        let plan = build_plan(line_prepared_svg(), &settings);
+        let draw_segments = plan
+            .segments
+            .iter()
+            .filter(|segment| matches!(segment.kind, MotionKind::Draw))
+            .copied()
+            .collect::<Vec<_>>();
+
+        assert_eq!(plan.first_draw_point, Some(vec2(10.0, 10.0)));
+        assert_eq!(draw_segments.len(), 3);
+        assert_eq!(draw_segments[0].start.truncate(), vec2(10.0, 10.0));
+        assert_eq!(draw_segments[0].end.truncate(), vec2(11.0, 10.0));
+        assert_eq!(draw_segments[1].start.truncate(), vec2(11.0, 10.0));
+        assert_eq!(draw_segments[1].end.truncate(), vec2(41.0, 10.0));
+        assert_eq!(draw_segments[2].start.truncate(), vec2(41.0, 10.0));
+        assert_eq!(draw_segments[2].end.truncate(), vec2(41.5, 10.0));
+    }
+
+    #[test]
+    fn silhouette_cutter_emits_corner_swivel_arc_without_corner_smoothing() {
+        let mut settings = drag_knife_settings(CurveOutputMode::PreferG2G3);
+        settings.corner_smoothing_enabled = true;
+        settings.corner_smoothing_radius_mm = 1.0;
+        settings.corner_smoothing_angle_deg = 45.0;
+        let plan = build_plan(right_angle_prepared_svg(), &settings);
+
+        assert!(plan.gcode_lines.iter().any(|line| line == "G3 X10.00 Y1.00 I-1.000 J0.000"));
+        assert!(plan.gcode_lines.iter().any(|line| line == "G1 X11.00 Y0.00 F1500"));
+        assert!(plan.gcode_lines.iter().any(|line| line == "G1 X10.00 Y11.00"));
+    }
+
+    #[test]
+    fn silhouette_cutter_closed_paths_overcut_along_first_segment_direction() {
+        let prepared = PreparedSvg {
+            source_name: "closed-square.svg".to_owned(),
+            strokes: vec![square_loop(vec2(0.0, 0.0), vec2(10.0, 10.0), false)],
+            fill_regions: Vec::new(),
+            warnings: Vec::new(),
+            drawing_origin: vec2(0.0, 0.0),
+            drawing_bounds: vec2(10.0, 10.0),
+            is_out_of_bounds: false,
+        };
+        let mut settings = drag_knife_settings(CurveOutputMode::PreferG2G3);
+        settings.overcut_mm = 0.5;
+        let plan = build_plan(prepared, &settings);
+        let draw_lines = plan
+            .gcode_lines
+            .iter()
+            .filter(|line| line.starts_with("G1 X"))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert_eq!(draw_lines.last().map(String::as_str), Some("G1 X1.50 Y0.00"));
+        assert!(
+            plan.gcode_lines.iter().any(|line| line.starts_with("G2 ") || line.starts_with("G3 "))
+        );
+    }
+
+    #[test]
+    fn silhouette_cutter_ignores_svg_fill_regions() {
+        let prepared = PreparedSvg {
+            source_name: "fill-only.svg".to_owned(),
+            strokes: Vec::new(),
+            fill_regions: vec![square_fill_region()],
+            warnings: Vec::new(),
+            drawing_origin: vec2(0.0, 0.0),
+            drawing_bounds: vec2(10.0, 10.0),
+            is_out_of_bounds: false,
+        };
+        let mut settings = drag_knife_settings(CurveOutputMode::LinearSegments);
+        settings.fill_enabled = true;
+        let plan = build_plan(prepared, &settings);
+
+        assert!(plan.segments.is_empty());
+        assert!(plan.first_draw_point.is_none());
+        assert_eq!(plan.stats.stroke_count, 0);
+    }
+
+    #[test]
+    fn silhouette_cutter_marks_offset_motion_out_of_bounds() {
+        let prepared = PreparedSvg {
+            source_name: "edge-line.svg".to_owned(),
+            strokes: vec![Stroke::new(vec![Segment::line(vec2(99.0, 50.0), vec2(100.0, 50.0))])],
+            fill_regions: Vec::new(),
+            warnings: Vec::new(),
+            drawing_origin: vec2(99.0, 50.0),
+            drawing_bounds: vec2(1.0, 0.0),
+            is_out_of_bounds: false,
+        };
+        let plan = build_plan(prepared, &drag_knife_settings(CurveOutputMode::LinearSegments));
+
+        assert!(plan.is_out_of_bounds);
+        assert!(plan.segments.iter().any(|segment| segment.end.x > 100.0));
     }
 
     #[test]

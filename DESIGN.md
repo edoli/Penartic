@@ -18,7 +18,7 @@ The product must remain useful even when no device is connected:
 ### 2.1 Offline workflow
 
 1. Start the app without a device.
-2. Choose the UI language from the left sidebar (default: English), then set printable width, printable height, draw speed, Z lift height, optional G2/G3 output, tangent-based corner-smoothing controls, and SVG fill controls. The default Z lift is 1.0 mm.
+2. Choose the UI language from the left sidebar (default: English), then set printable width, printable height, draw speed, Z lift height, the tool mode (pen plotter or silhouette cutter), optional G2/G3 output, and the mode-specific controls: pen mode exposes tangent-based corner-smoothing and SVG fill controls, while silhouette cutter mode exposes blade offset, overcut, and corner-swivel controls. The default Z lift is 1.0 mm.
 3. Load one or more SVG files through the file picker, drag-and-drop, or a native startup path used for validation.
 4. Start each SVG from its physical document size when the root SVG declares an explicit `width` or `height`, converting CSS pixel space into millimeters before import; otherwise fall back to treating raw SVG coordinate units as millimeters. Center once on load, then select individual SVG objects and adjust position, independent X/Y scale, local width/height in millimeters, and rotation from the object toolbar or preview gizmo controls when needed.
 5. Convert each SVG into reusable IR, combine the placed objects into one preview motion/G-code job, and avoid automatically rescaling existing SVG placements when printable area settings later change.
@@ -41,8 +41,10 @@ The product must remain useful even when no device is connected:
 - travel moves lift the pen by the configured Z lift amount
 - jobs in home-start mode lift Z with a relative move, home XY, move to the first drawing point while lifted, lower Z with a relative move, and then draw
 - jobs in direct-start mode skip XY homing but still lift Z by the configured amount, move to the first drawing point while lifted, lower Z with a relative move, and then draw
-- drawing moves within a stroke are emitted as continuous `G1` XY moves by default; optional sharp-corner rounding is disabled by default, can emit generated rounded-corner arcs as `G2`/`G3` when enabled, and when G2/G3 output is enabled the app deduplicates the prepared stroke polyline and greedily compresses it into circular arcs and straight runs, but only accepts candidate arcs that satisfy seed/sagitta gates and stay close to the original polyline vertices plus segment midpoints before falling back to segmented `G1` output
-- filled SVG paths are converted into internal fill strokes before G-code generation when fill support is enabled, including segmented hatch rows and continuous zigzag passes that keep the pen down across adjacent rows when possible
+- pen-plotter drawing moves within a stroke are emitted as continuous `G1` XY moves by default; optional sharp-corner rounding is disabled by default, can emit generated rounded-corner arcs as `G2`/`G3` when enabled, and when G2/G3 output is enabled the app deduplicates the prepared stroke polyline and greedily compresses it into circular arcs and straight runs, but only accepts candidate arcs that satisfy seed/sagitta gates and stay close to the original polyline vertices plus segment midpoints before falling back to segmented `G1` output
+- silhouette-cutter mode treats `Z = 0` as the cutting depth, ignores SVG fill strokes, inserts an initial blade-alignment move, offsets the holder path by the configured blade offset, optionally inserts corner-swivel arcs centered on each turn, and can add a final overcut extension; closed paths apply overcut along the first segment direction after the closing swivel so the seam finishes cleanly
+- actual out-of-bounds warnings must consider the compensated cutter-holder motion, not just the intended outline geometry
+- filled SVG paths are converted into internal fill strokes before G-code generation only in pen-plotter mode when fill support is enabled, including segmented hatch rows and continuous zigzag passes that keep the pen down across adjacent rows when possible
 
 ## 3. Runtime architecture
 
@@ -55,7 +57,7 @@ The product must remain useful even when no device is connected:
 | `src/paths/ir.rs` | Generic path intermediate-representation primitives, stroke/fill collection aliases, curve math, dash splitting, fill-region metadata, and polyline approximation helpers |
 | `src/paths/stroke_processing.rs` | Generic stroke normalization, ordering, joining, and geometric bounds helpers used after parsing |
 | `src/paths/svg_parser.rs` | Parse SVG with `usvg`, sample visible SVG paths into path IR, surface SVG-specific warnings, and apply persistent placement transforms |
-| `src/plot/gcode.rs` | Convert IR into preview motion segments, generate fill hatch paths, apply optional tangent-based join rounding, and emit linear or G2/G3 G-code |
+| `src/plot/gcode.rs` | Convert IR into preview motion segments, generate pen fill hatch paths, apply optional tangent-based join rounding, compensate drag-knife cutter paths, and emit linear or G2/G3 G-code |
 | `src/plot/model.rs` | Shared settings, motion, and toolpath data structures |
 | `src/platform/device/mod.rs` | Transport-agnostic device controller state, connection preferences, worker dispatch, shared parsing/helpers, and device-facing app API |
 | `src/platform/device/serial.rs` | Native serial and web-serial workers, ACK-driven streaming, and serial-specific probing |
@@ -71,7 +73,7 @@ The product must remain useful even when no device is connected:
 ### 4.1 UI layout
 
 - left sidebar: fixed-width, vertically scrollable language selector, SVG/G-code actions, device controls, connection-method selector, method-specific connection settings, connection/print status, jog/home controls, editable print settings, job stats, warnings, logs
-- sidebar action buttons use a slightly taller shared height, paired device/job actions are laid out in evenly sized columns with explicit spacing, generated jobs expose evenly sized View G-code / Copy G-code / Save G-code buttons near SVG loading, the View G-code action opens a dedicated secondary viewer window on native builds and a resizable embedded viewer window on web/embedded fallbacks that stays above preview overlays, the print-start homing toggle sits directly under the print action row, long firmware text stays on one line with hover access to the full value, the upper sidebar controls scroll independently from a left-aligned device log section that fills the remaining sidebar height, advanced G2/G3, corner-smoothing, and SVG fill controls can be toggled from settings, and sidebar content growth must not resize the preview canvas when the window size stays fixed
+- sidebar action buttons use a slightly taller shared height, paired device/job actions are laid out in evenly sized columns with explicit spacing, generated jobs expose evenly sized View G-code / Copy G-code / Save G-code buttons near SVG loading, the View G-code action opens a dedicated secondary viewer window on native builds and a resizable embedded viewer window on web/embedded fallbacks that stays above preview overlays, the print-start homing toggle sits directly under the print action row, long firmware text stays on one line with hover access to the full value, the upper sidebar controls scroll independently from a left-aligned device log section that fills the remaining sidebar height, settings expose a tool-mode selector plus mode-specific advanced controls (corner smoothing and fill for pen plotting, blade offset / overcut / corner swivel for silhouette cutting), and sidebar content growth must not resize the preview canvas when the window size stays fixed
 - central panel: a full-size preview canvas with a translucent top object toolbar for move/scale/rotate selection, numeric X/Y position, independent X/Y scale percentages, local width/height millimeter edits, a default-on aspect-ratio lock for scale edits, rotation edits, and selected-object deletion; mode-specific gizmos provide move arrows, scale handles, or a rotation ring, and a translucent bottom overlay keeps playback buttons, the 2D/3D view selector, and the full-width timeline slider visible in smaller windows
 - the preview overlay can command a connected idle device to move to the current timeline pen position, switch between 2D and 3D view modes, and toggle lifted travel paths or the placed SVG bounding box
 
@@ -160,7 +162,7 @@ updated with the same value to avoid WGPU validation errors.
 - web serial streaming follows the same comment stripping, ACK tracking, stop, jog/home, and bounded
   one-line in-flight behavior as the native worker; it requires a browser with Web Serial support, a secure
   context, and the user's explicit port selection
-- G2/G3 arc output is optional because firmware support varies and is used both for rounded-corner transitions and for whole-stroke polyline arc compression, reducing overly segmented motion while keeping whole-stroke fitting bounded by geometric-error checks against the original polyline
+- G2/G3 arc output is optional because firmware support varies and is used for rounded-corner transitions, drag-knife corner-swivel arcs, and whole-stroke polyline arc compression, reducing overly segmented motion while keeping whole-stroke fitting bounded by geometric-error checks against the original polyline
 - Linear segment output remains available as the compatibility fallback when firmware cannot execute `G2`/`G3`
 
 ## 7. SVG conversion pipeline
@@ -181,10 +183,11 @@ updated with the same value to avoid WGPU validation errors.
 10. Apply the current placement to the already ordered stroke and fill IR when SVG position, scale, or rotation changes, so
    placement rebuilds do not repeat dash splitting or stroke-order optimization.
 11. Combine all placed objects into a single prepared drawing job while preserving per-object placement state for selection, warnings, and manipulation.
-12. When fill support is enabled, generate pen fill strokes for filled regions before outline strokes. Fill patterns currently include single-direction lines, crosshatch, segmented zigzag rows, and continuous zigzag rows that greedily stitch adjacent scanlines when the connector stays inside the filled region. Fill line spacing is exposed directly in millimeters so the UI matches the actual physical spacing between successive fill passes and can intentionally overdraw with sub-millimeter values.
-13. Optionally replace sharp joins between adjacent primitives by comparing their end/start tangents and inserting a tiny rounded transition using a configurable radius and turn-angle threshold.
-14. Mark drawings that extend beyond the printable area so the UI and preview can warn/highlight them.
-15. Build preview motion segments with explicit travel lifts from the IR plus any generated fill strokes and rounded corners.
+12. When pen fill support is enabled, generate fill strokes for filled regions before outline strokes. Fill patterns currently include single-direction lines, crosshatch, segmented zigzag rows, and continuous zigzag rows that greedily stitch adjacent scanlines when the connector stays inside the filled region. Fill line spacing is exposed directly in millimeters so the UI matches the actual physical spacing between successive fill passes and can intentionally overdraw with sub-millimeter values.
+13. In pen-plotter mode, optionally replace sharp joins between adjacent primitives by comparing their end/start tangents and inserting a tiny rounded transition using a configurable radius and turn-angle threshold.
+14. In silhouette-cutter mode, flatten the intended outline into a polyline, skip fill generation and pen corner-smoothing, then build the compensated holder path by adding the initial blade-alignment move, offset straight runs, optional corner-swivel arcs centered on each vertex, and any final overcut extension.
+15. Mark drawings that extend beyond the printable area so the UI and preview can warn/highlight them, including any extra drag-knife offset or overcut motion.
+16. Build preview motion segments with explicit travel lifts from the IR plus any generated fill strokes, rounded pen joins, or compensated cutter motion.
 16. Emit standard linear G-code and optional `G2`/`G3` arc commands for compatible rounded corners and fitted arc-shaped curve segments from the same pipeline.
 17. Filter non-finite drawing primitives before G-code generation and fall back to an absolute travel move instead of panicking if a Z-travel helper receives mismatched XY coordinates.
 

@@ -20,7 +20,7 @@ use crate::{
         gcode,
         model::{
             CurveOutputMode, FillPattern, MAX_FILL_SPACING_MM, MIN_FILL_SPACING_MM, PrintStartMode,
-            PrintableArea, SvgPlacement, ToolSettings, ToolpathPlan,
+            PrintableArea, SvgPlacement, ToolMode, ToolSettings, ToolpathPlan,
         },
     },
     res::{
@@ -1214,6 +1214,50 @@ impl PenarticApp {
                             0.1,
                             0.1..=25.0,
                         );
+                        let previous_tool_mode = self.settings.tool_mode;
+                        ui.label(text.tool_mode);
+                        egui::ComboBox::from_id_salt("tool-mode-combo")
+                            .selected_text(tool_mode_label(self.settings.tool_mode, text))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.settings.tool_mode,
+                                    ToolMode::PenPlotter,
+                                    text.tool_mode_pen_plotter,
+                                );
+                                ui.selectable_value(
+                                    &mut self.settings.tool_mode,
+                                    ToolMode::SilhouetteCutter,
+                                    text.tool_mode_silhouette_cutter,
+                                );
+                            });
+                        settings_changed |= previous_tool_mode != self.settings.tool_mode;
+                        let silhouette_cutter_mode = self.settings.tool_mode.is_silhouette_cutter();
+                        if silhouette_cutter_mode {
+                            settings_changed |= drag_value_row(
+                                ui,
+                                text.blade_offset,
+                                &mut self.settings.blade_offset_mm,
+                                0.05,
+                                0.0..=10.0,
+                            );
+                            settings_changed |= drag_value_row(
+                                ui,
+                                text.overcut,
+                                &mut self.settings.overcut_mm,
+                                0.05,
+                                0.0..=20.0,
+                            );
+                            if ui
+                                .checkbox(
+                                    &mut self.settings.corner_swivel_enabled,
+                                    text.corner_swivel,
+                                )
+                                .changed()
+                            {
+                                settings_changed = true;
+                            }
+                            ui.small(text.silhouette_cutter_hint);
+                        }
                         let mut prefer_g2g3 = self.settings.curve_output_mode.prefers_g2g3();
                         if ui
                             .checkbox(&mut prefer_g2g3, text.use_arc_gcode)
@@ -1228,81 +1272,86 @@ impl PenarticApp {
                             settings_changed = true;
                         }
 
-                        if ui
-                            .checkbox(
-                                &mut self.settings.corner_smoothing_enabled,
-                                text.round_sharp_corners,
-                            )
-                            .changed()
-                        {
-                            settings_changed = true;
-                        }
-                        if self.settings.corner_smoothing_enabled {
-                            settings_changed |= drag_value_row(
-                                ui,
-                                text.corner_rounding_radius,
-                                &mut self.settings.corner_smoothing_radius_mm,
-                                0.05,
-                                0.1..=10.0,
-                            );
-                            settings_changed |= drag_value_row(
-                                ui,
-                                text.corner_rounding_start_angle,
-                                &mut self.settings.corner_smoothing_angle_deg,
-                                1.0,
-                                5.0..=170.0,
-                            );
-                            ui.small(text.corner_rounding_hint);
-                        }
+                        if !silhouette_cutter_mode {
+                            if ui
+                                .checkbox(
+                                    &mut self.settings.corner_smoothing_enabled,
+                                    text.round_sharp_corners,
+                                )
+                                .changed()
+                            {
+                                settings_changed = true;
+                            }
+                            if self.settings.corner_smoothing_enabled {
+                                settings_changed |= drag_value_row(
+                                    ui,
+                                    text.corner_rounding_radius,
+                                    &mut self.settings.corner_smoothing_radius_mm,
+                                    0.05,
+                                    0.1..=10.0,
+                                );
+                                settings_changed |= drag_value_row(
+                                    ui,
+                                    text.corner_rounding_start_angle,
+                                    &mut self.settings.corner_smoothing_angle_deg,
+                                    1.0,
+                                    5.0..=170.0,
+                                );
+                                ui.small(text.corner_rounding_hint);
+                            }
 
-                        if ui
-                            .checkbox(&mut self.settings.fill_enabled, text.fill_closed_shapes)
-                            .changed()
-                        {
-                            settings_changed = true;
-                        }
-                        if self.settings.fill_enabled {
-                            let previous_pattern = self.settings.fill_pattern;
-                            egui::ComboBox::from_id_salt("fill-pattern-combo")
-                                .selected_text(fill_pattern_label(self.settings.fill_pattern, text))
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.settings.fill_pattern,
-                                        FillPattern::Lines,
-                                        text.fill_pattern_lines,
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.settings.fill_pattern,
-                                        FillPattern::Crosshatch,
-                                        text.fill_pattern_crosshatch,
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.settings.fill_pattern,
-                                        FillPattern::Zigzag,
-                                        text.fill_pattern_zigzag,
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.settings.fill_pattern,
-                                        FillPattern::ContinuousZigzag,
-                                        text.fill_pattern_continuous_zigzag,
-                                    );
-                                });
-                            settings_changed |= previous_pattern != self.settings.fill_pattern;
-                            settings_changed |= drag_value_row_tooltip(
-                                ui,
-                                text.fill_spacing,
-                                &mut self.settings.fill_spacing_mm,
-                                0.1,
-                                MIN_FILL_SPACING_MM..=MAX_FILL_SPACING_MM,
-                                text.fill_spacing_hint,
-                            );
-                            settings_changed |= drag_value_row(
-                                ui,
-                                text.fill_angle,
-                                &mut self.settings.fill_angle_degrees,
-                                1.0,
-                                0.0..=179.0,
-                            );
+                            if ui
+                                .checkbox(&mut self.settings.fill_enabled, text.fill_closed_shapes)
+                                .changed()
+                            {
+                                settings_changed = true;
+                            }
+                            if self.settings.fill_enabled {
+                                let previous_pattern = self.settings.fill_pattern;
+                                egui::ComboBox::from_id_salt("fill-pattern-combo")
+                                    .selected_text(fill_pattern_label(
+                                        self.settings.fill_pattern,
+                                        text,
+                                    ))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut self.settings.fill_pattern,
+                                            FillPattern::Lines,
+                                            text.fill_pattern_lines,
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.settings.fill_pattern,
+                                            FillPattern::Crosshatch,
+                                            text.fill_pattern_crosshatch,
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.settings.fill_pattern,
+                                            FillPattern::Zigzag,
+                                            text.fill_pattern_zigzag,
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.settings.fill_pattern,
+                                            FillPattern::ContinuousZigzag,
+                                            text.fill_pattern_continuous_zigzag,
+                                        );
+                                    });
+                                settings_changed |= previous_pattern != self.settings.fill_pattern;
+                                settings_changed |= drag_value_row_tooltip(
+                                    ui,
+                                    text.fill_spacing,
+                                    &mut self.settings.fill_spacing_mm,
+                                    0.1,
+                                    MIN_FILL_SPACING_MM..=MAX_FILL_SPACING_MM,
+                                    text.fill_spacing_hint,
+                                );
+                                settings_changed |= drag_value_row(
+                                    ui,
+                                    text.fill_angle,
+                                    &mut self.settings.fill_angle_degrees,
+                                    1.0,
+                                    0.0..=179.0,
+                                );
+                            }
                         }
 
                         if settings_changed || print_start_mode_changed {
@@ -2223,6 +2272,13 @@ fn fill_pattern_label(pattern: FillPattern, text: &Strings) -> &'static str {
         FillPattern::Crosshatch => text.fill_pattern_crosshatch,
         FillPattern::Zigzag => text.fill_pattern_zigzag,
         FillPattern::ContinuousZigzag => text.fill_pattern_continuous_zigzag,
+    }
+}
+
+fn tool_mode_label(mode: ToolMode, text: &Strings) -> &'static str {
+    match mode {
+        ToolMode::PenPlotter => text.tool_mode_pen_plotter,
+        ToolMode::SilhouetteCutter => text.tool_mode_silhouette_cutter,
     }
 }
 
