@@ -1,7 +1,7 @@
 use super::fonts;
 #[cfg(not(target_arch = "wasm32"))]
 use super::fonts::LoadedFallbackFonts;
-use std::time::Duration;
+use std::{fmt::Write as _, time::Duration};
 
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -86,6 +86,7 @@ pub struct PenarticApp {
     show_gcode_window: bool,
     focus_gcode_window: bool,
     gcode_window_text: String,
+    gcode_window_line_numbers: String,
     #[cfg(not(target_arch = "wasm32"))]
     pending_fallback_fonts: Option<mpsc::Receiver<LoadedFallbackFonts>>,
     #[cfg(target_arch = "wasm32")]
@@ -220,6 +221,7 @@ impl PenarticApp {
             show_gcode_window: false,
             focus_gcode_window: false,
             gcode_window_text: String::new(),
+            gcode_window_line_numbers: String::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_fallback_fonts: fonts::spawn_fallback_font_loader(),
             #[cfg(target_arch = "wasm32")]
@@ -375,6 +377,7 @@ impl PenarticApp {
         if self.svg_objects.is_empty() {
             self.toolpath_plan = None;
             self.gcode_window_text.clear();
+            self.gcode_window_line_numbers.clear();
             return;
         }
 
@@ -450,6 +453,7 @@ impl PenarticApp {
     fn refresh_gcode_window_text(&mut self) {
         self.gcode_window_text =
             self.toolpath_plan.as_ref().map(ToolpathPlan::gcode_text).unwrap_or_default();
+        self.gcode_window_line_numbers = format_gcode_line_numbers(&self.gcode_window_text);
     }
 
     fn open_gcode_window(&mut self) {
@@ -1780,6 +1784,7 @@ impl PenarticApp {
         let has_gcode = self.toolpath_plan.is_some();
         let save_enabled = has_gcode && !self.is_gcode_save_pending();
         let gcode_window_text = self.gcode_window_text.as_str();
+        let gcode_window_line_numbers = self.gcode_window_line_numbers.as_str();
 
         #[cfg(target_arch = "wasm32")]
         {
@@ -1798,6 +1803,7 @@ impl PenarticApp {
                         &mut copy_gcode,
                         &mut save_gcode,
                         gcode_window_text,
+                        gcode_window_line_numbers,
                         text,
                     );
                 });
@@ -1839,6 +1845,7 @@ impl PenarticApp {
                         &mut copy_gcode,
                         &mut save_gcode,
                         gcode_window_text,
+                        gcode_window_line_numbers,
                         text,
                     );
                 } else {
@@ -1850,6 +1857,7 @@ impl PenarticApp {
                             &mut copy_gcode,
                             &mut save_gcode,
                             gcode_window_text,
+                            gcode_window_line_numbers,
                             text,
                         );
                     });
@@ -2375,6 +2383,7 @@ fn show_gcode_window_contents(
     copy_gcode: &mut bool,
     save_gcode: &mut bool,
     gcode_window_text: &str,
+    gcode_window_line_numbers: &str,
     text: &'static Strings,
 ) {
     if !has_gcode {
@@ -2395,19 +2404,45 @@ fn show_gcode_window_contents(
     let available_size = ui.available_size();
     let editor_width = available_size.x.max(1.0);
     let editor_height = available_size.y.max(240.0);
+    let line_count = gcode_window_text.lines().count().max(1).max(24);
+    let gutter_digits =
+        gcode_window_line_numbers.lines().next_back().map(str::len).unwrap_or(1) as f32;
+    let gutter_width = gutter_digits * (ui.text_style_height(&egui::TextStyle::Monospace) * 0.55);
 
     egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-        let mut selectable_text = gcode_window_text;
-        ui.add_sized(
-            [editor_width, editor_height],
-            egui::TextEdit::multiline(&mut selectable_text)
-                .id_salt("gcode-window-text")
-                .code_editor()
-                .cursor_at_end(false)
-                .desired_rows(24)
-                .desired_width(f32::INFINITY),
-        );
+        ui.set_min_height(editor_height);
+        ui.horizontal_top(|ui| {
+            ui.add_sized(
+                [gutter_width, 0.0],
+                egui::Label::new(egui::RichText::new(gcode_window_line_numbers).monospace()),
+            );
+            ui.separator();
+
+            let mut selectable_text = gcode_window_text;
+            ui.add(
+                egui::TextEdit::multiline(&mut selectable_text)
+                    .id_salt("gcode-window-text")
+                    .code_editor()
+                    .cursor_at_end(false)
+                    .desired_rows(line_count)
+                    .desired_width(editor_width),
+            );
+        });
     });
+}
+
+fn format_gcode_line_numbers(gcode_text: &str) -> String {
+    let line_count = gcode_text.lines().count();
+    if line_count == 0 {
+        return String::new();
+    }
+
+    let line_number_width = line_count.to_string().len();
+    let mut numbered = String::with_capacity(line_count * (line_number_width + 1));
+    for index in 0..line_count {
+        let _ = writeln!(numbered, "{:>width$}", index + 1, width = line_number_width);
+    }
+    numbered
 }
 
 fn gcode_save_file_name(source_name: &str, source_count: usize) -> String {
@@ -2521,6 +2556,12 @@ mod tests {
     fn gcode_save_file_name_uses_single_source_stem() {
         assert_eq!(gcode_save_file_name("sample/sample_curve.svg", 1), "sample_curve.gcode");
         assert_eq!(gcode_save_file_name("curve:demo.svg", 1), "curve_demo.gcode");
+    }
+
+    #[test]
+    fn format_gcode_line_numbers_builds_a_separate_gutter() {
+        assert_eq!(format_gcode_line_numbers("G0 X0\nG1 X1\nG1 X2"), "1\n2\n3\n");
+        assert_eq!(format_gcode_line_numbers(""), "");
     }
 
     #[test]
